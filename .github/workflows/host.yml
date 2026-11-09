@@ -73,7 +73,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e codegen
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build protobuf-compiler
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build protobuf-compiler libprotobuf-dev
       - name: configure
         run: cmake --preset host-${{ matrix.sanitizer }}
       - name: build
@@ -94,7 +94,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e codegen
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build protobuf-compiler clang-tidy
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build protobuf-compiler libprotobuf-dev clang-tidy
       - run: cmake --preset host-debug
       - run: cmake --build build/host-debug --target qmp_test_joint
       - run: clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c

@@ -1,0 +1,12 @@
+syntax = "proto3";
+package err;
+import "uprotocol/uoptions.proto";
+import "qmp/options.proto";
+message Req { oneof k { int32 a = 1; int32 b = 2; } }
+message Rep { int32 a = 1; }
+service S {
+  option (uprotocol.service_id) = 0x0201;
+  option (uprotocol.service_version_major) = 1;
+  rpc M(Req) returns (Rep) { option (uprotocol.method_id) = 1; }
+}
+

@@ -1,0 +1,13 @@
+syntax = "proto3";
+package err;
+import "uprotocol/uoptions.proto";
+import "qmp/options.proto";
+import "google/protobuf/timestamp.proto";
+message Req { google.protobuf.Timestamp t = 1; }
+message Rep { int32 a = 1; }
+service S {
+  option (uprotocol.service_id) = 0x0201;
+  option (uprotocol.service_version_major) = 1;
+  rpc M(Req) returns (Rep) { option (uprotocol.method_id) = 1; }
+}
+

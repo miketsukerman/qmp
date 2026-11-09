@@ -42,13 +42,23 @@ class _Ctx:
         self.errors.append(f"{loc}: error: {msg}")
 
 
+def _disp(fq: str) -> str:
+    """Fully-qualified name without protoc's leading dot, for messages shown to users."""
+    return fq.lstrip(".")
+
+
 def _check_message(ctx: _Ctx, fq: str, chain: tuple[str, ...]) -> None:
-    """Validate a message and, recursively, the messages it embeds."""
+    """Validate a message and, recursively, the messages it embeds.
+
+    `chain` is the embedding path from the top-level payload down to (excluding) `fq`;
+    embedding depth is bounded by MAX_NESTING because every level is inlined into the layout.
+    """
     if fq in chain:
         m = ctx.u.messages[fq]
         ctx.err(
             m.loc,
-            f"message '{fq}' is recursive via {' -> '.join(chain)}; "
+            f"message '{_disp(fq)}' is recursive via "
+            f"{' -> '.join(_disp(c) for c in (*chain, fq))}; "
             "fixed-layout messages cannot embed themselves",
         )
         return
@@ -56,19 +66,14 @@ def _check_message(ctx: _Ctx, fq: str, chain: tuple[str, ...]) -> None:
         return
     ctx.checked_messages.add(fq)
     m = ctx.u.messages[fq]
-    if fq.startswith(".google.protobuf."):
-        ctx.err(m.loc, f"well-known type '{fq}' is not supported (no Any/Struct/Timestamp in v1)")
-        return
     fm = _file_of(ctx.u, fq)
     if fm is not None and fm.syntax != "proto3":
-        ctx.err(m.loc, f"message '{fq}' is '{fm.syntax}'; only proto3 is supported")
+        ctx.err(m.loc, f"message '{_disp(fq)}' is '{fm.syntax}'; only proto3 is supported")
     if m.map_entry:
         ctx.err(m.loc, "map<> fields are not supported in v1")
         return
     if m.has_oneof:
-        ctx.err(m.loc, f"oneof in '{fq}' is not supported in v1")
-    if m.depth > MAX_NESTING:
-        ctx.err(m.loc, f"message '{fq}' nested deeper than {MAX_NESTING} levels")
+        ctx.err(m.loc, f"oneof in '{_disp(fq)}' is not supported in v1")
     for f in m.fields:
         if f.kind == Kind.MESSAGE:
             target = ctx.u.messages.get(f.type_name)
@@ -81,12 +86,27 @@ def _check_message(ctx: _Ctx, fq: str, chain: tuple[str, ...]) -> None:
             if f.type_name == ".google.protobuf.Any":
                 ctx.err(f.loc, f"field '{f.name}': google.protobuf.Any is not supported in v1")
                 continue
+            if f.type_name.startswith(".google.protobuf."):
+                ctx.err(
+                    f.loc,
+                    f"field '{f.name}': well-known type '{_disp(f.type_name)}' is not "
+                    "supported (no Any/Struct/Timestamp in v1)",
+                )
+                continue
             if target.is_empty:
                 ctx.err(
                     f.loc,
-                    f"field '{f.name}': zero-field message '{f.type_name}' cannot be "
+                    f"field '{f.name}': zero-field message '{_disp(f.type_name)}' cannot be "
                     "a field type (no zero-sized struct is emitted)",
                 )
+                continue
+            if len(chain) + 1 > MAX_NESTING:
+                ctx.err(
+                    f.loc,
+                    f"field '{f.name}': message '{_disp(f.type_name)}' nested deeper than "
+                    f"{MAX_NESTING} levels",
+                )
+                continue
             _check_message(ctx, f.type_name, (*chain, fq))
         elif f.kind == Kind.ENUM and f.type_name not in ctx.u.enums:
             ctx.err(f.loc, f"field '{f.name}': unresolved enum type '{f.type_name}'")

@@ -25,4 +25,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 set(CMAKE_C_COMPILER "$ENV{QNX_HOST}/usr/bin/qcc")
 set(CMAKE_C_COMPILER_TARGET "gcc_nto${QMP_QNX_ARCH}")
 set(CMAKE_CXX_COMPILER "$ENV{QNX_HOST}/usr/bin/q++")
-set(CMAKE_CXX_COMPILER_TARGET "gcc_nto${QMP_QNX_ARCH}_gpp")
+# VERIFY(qnx8): V-QNX-025 — does the _gpp variant exist on 8.0 and does it select libc++?
+# Upstream uProtocol QNX 8.0 profiles use plain gcc_nto<arch>. Override with -DQMP_QNX_CXX_VARIANT.
+set(QMP_QNX_CXX_VARIANT "gcc_nto${QMP_QNX_ARCH}_gpp" CACHE STRING "q++ -V variant")
+set(CMAKE_CXX_COMPILER_TARGET "${QMP_QNX_CXX_VARIANT}")

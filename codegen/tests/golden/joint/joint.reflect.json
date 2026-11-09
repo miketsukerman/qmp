@@ -1,0 +1,179 @@
+{
+  "qmp_reflect_version": 1,
+  "generator": "protoc-gen-qmp 0.1.0",
+  "up_spec": "v1.5.8",
+  "source": "examples/demo/joint/v1/joint.proto",
+  "package": "demo.joint.v1",
+  "services": [
+    {
+      "name": "Joint",
+      "full_name": "demo.joint.v1.Joint",
+      "service_id": 257,
+      "service_name": "demo.joint.Joint",
+      "version": {
+        "major": 1,
+        "minor": 0
+      },
+      "permission_level": null,
+      "uuri": "/101/1",
+      "qnx_path": "qmp/0101-0000/v1",
+      "max_msg_size": 72,
+      "methods": [
+        {
+          "name": "SetTarget",
+          "id": 1,
+          "uuri": "/101/1/1",
+          "oneway": false,
+          "input": "demo.joint.v1.SetTargetRequest",
+          "output": "demo.joint.v1.SetTargetReply",
+          "in_size": 8,
+          "out_size": 8,
+          "allow_types": [],
+          "permission_level": null
+        },
+        {
+          "name": "Stop",
+          "id": 2,
+          "uuri": "/101/1/2",
+          "oneway": true,
+          "input": "demo.joint.v1.Empty",
+          "output": "demo.joint.v1.Empty",
+          "in_size": 0,
+          "out_size": 0,
+          "allow_types": [],
+          "permission_level": null
+        },
+        {
+          "name": "GetState",
+          "id": 3,
+          "uuri": "/101/1/3",
+          "oneway": false,
+          "input": "demo.joint.v1.Empty",
+          "output": "demo.joint.v1.JointState",
+          "in_size": 0,
+          "out_size": 48,
+          "allow_types": [],
+          "permission_level": null
+        }
+      ],
+      "topics": [
+        {
+          "name": "StateChanged",
+          "id": 32769,
+          "uuri": "/101/1/8001",
+          "message": "demo.joint.v1.JointState",
+          "size": 48,
+          "mode": "LATEST",
+          "depth": 0,
+          "notification": false
+        }
+      ]
+    }
+  ],
+  "messages": {
+    "demo.joint.v1.Empty": {
+      "name": "demo.joint.v1.Empty",
+      "c_type": null,
+      "size": 0,
+      "align": 0,
+      "fields": []
+    },
+    "demo.joint.v1.JointState": {
+      "name": "demo.joint.v1.JointState",
+      "c_type": "demo_joint_v1_JointState",
+      "size": 48,
+      "align": 8,
+      "fields": [
+        {
+          "name": "seq",
+          "number": 1,
+          "type": "uint64",
+          "repeated": false,
+          "c_type": "uint64_t",
+          "offset": 0,
+          "size": 8
+        },
+        {
+          "name": "timestamp_ns",
+          "number": 2,
+          "type": "uint64",
+          "repeated": false,
+          "c_type": "uint64_t",
+          "offset": 8,
+          "size": 8
+        },
+        {
+          "name": "position_rad",
+          "number": 3,
+          "type": "float",
+          "repeated": false,
+          "c_type": "float",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "velocity",
+          "number": 4,
+          "type": "float",
+          "repeated": false,
+          "c_type": "float",
+          "offset": 20,
+          "size": 4
+        },
+        {
+          "name": "mode",
+          "number": 5,
+          "type": "string",
+          "repeated": false,
+          "c_type": "demo_joint_v1_JointState_mode_t",
+          "offset": 24,
+          "size": 18,
+          "max_len": 16
+        }
+      ]
+    },
+    "demo.joint.v1.SetTargetReply": {
+      "name": "demo.joint.v1.SetTargetReply",
+      "c_type": "demo_joint_v1_SetTargetReply",
+      "size": 8,
+      "align": 4,
+      "fields": [
+        {
+          "name": "result",
+          "number": 1,
+          "type": "int32",
+          "repeated": false,
+          "c_type": "int32_t",
+          "offset": 0,
+          "size": 4
+        }
+      ]
+    },
+    "demo.joint.v1.SetTargetRequest": {
+      "name": "demo.joint.v1.SetTargetRequest",
+      "c_type": "demo_joint_v1_SetTargetRequest",
+      "size": 8,
+      "align": 4,
+      "fields": [
+        {
+          "name": "position_rad",
+          "number": 1,
+          "type": "float",
+          "repeated": false,
+          "c_type": "float",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "max_velocity",
+          "number": 2,
+          "type": "float",
+          "repeated": false,
+          "c_type": "float",
+          "offset": 4,
+          "size": 4
+        }
+      ]
+    }
+  }
+}

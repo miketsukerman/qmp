@@ -1,0 +1,5 @@
+syntax = "proto3";
+package err;
+import "uprotocol/uoptions.proto";
+import "qmp/options.proto";
+message Req { int32 a = 1; }

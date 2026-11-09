@@ -130,11 +130,29 @@ message-passing binding.
 4. **Identifier mapping** per DESIGN §7. The default instance id is `0x0000` as in up-spec, so
    the default QNX name is `qmp/0101-0000/v1` (deviates from the brief's `0101-0001` example).
 5. **Adapter scope (stretch, W4):** `adapters/uprotocol/` implements uP-L1 `UTransport`
-   (`send`, `registerListener`, `unregisterListener`) for REQUEST/RESPONSE and PUBLISH on top of
-   the C ABI, using up-cpp if it builds with `q++` (spike V-UP-009), otherwise a minimal
-   self-contained `UMessage` struct. No uDiscovery/uSubscription/uTwin. UPriority is carried in
+   (`send`, `registerListener(sourceFilter, sinkFilter, listener)`, `unregisterListener`) for
+   REQUEST/RESPONSE and PUBLISH on top of the C ABI with a minimal self-contained `UMessage`
+   struct. **Spike outcome (2026-11-09, `docs/spikes/uprotocol-qnx.md`, V-UP-009): NO-GO for
+   linking up-cpp on target** — up-cpp 1.0.1 pins up-core-api 1.6.0-alpha (not 1.5.8), needs
+   full libprotobuf + spdlog cross-built via Conan, and upstream's QNX 8.0 profile is marked
+   "in progress". An optional host-only bridge (`QMP_ADAPTER_USE_UPCPP`, default OFF) may be
+   added for interop demos. No uDiscovery/uSubscription/uTwin. UPriority is carried in
    `hdr.up_priority` and mapped to QNX priorities (DESIGN §5.4). The adapter is never the measured
    hot path.
+6. **Vendoring done (W1):** `third_party/up-spec/PIN.md` records tag/commit and the re-vendor
+   recipe. Differences found against the project brief while confirming the pin:
+   * `UCode` is defined in `uprotocol/v1/ustatus.proto`, not a `ucode.proto` (V-UP-003).
+   * `ue_id`: service id is the **low** 16 bits, instance the **high** 16 bits
+     (`basics/uri.adoc`); wildcard instance in the spec is `0xFFFF` (`0xFFFF_0000` mask), and the
+     brief's default instance `0001` is replaced by the spec default `0000` (V-UP-002).
+   * URI path uses upper-case hex with leading zeros omitted (`/101/1/8001`), not zero-padded
+     hex4 (V-UP-006).
+   * uProtocol UUIDs are UUIDv8, not v7 (V-UP-007).
+   * `UServiceTopic` has fields `id=1, name=2, message=3, resources=4, permission_level=5`; v1
+     rejects `resources` (V-UP-008).
+   * Default message priority when unset is CS1; REQUESTs must be ≥ CS4 (V-UP-004).
+   * `uoptions.proto` in the vendored tree has CRLF line endings; `.gitattributes` normalises
+     them to LF.
 
 **Consequences.** + Any uP-annotated proto compiles with qmp unchanged (if within the subset).
 + Clear path to uP interop without affecting native performance. − Pinning to v1.5.8 means
@@ -169,7 +187,10 @@ exceptions). − Some duplication of doc comments between `.h` and `.hpp` templa
 
 ## ADR-007 C++ standard level: C++17 default; C++20 only with SDP ≥ 8.0.2
 
-**Status:** proposed 2026-11-09 — finalised after spike `docs/spikes/sdp-level.md` (V-QNX-020)
+**Status:** proposed 2026-11-09 — finalised after spike `docs/spikes/sdp-level.md` (V-QNX-020).
+**Proposed outcome (W1 spike):** accept as written — stay on C++17, no `QMP_CXX20` in the
+hackathon timeframe; the spike adds V-QNX-025 (`_gpp` variant vs. plain `gcc_nto<arch>` and
+libc++ selection) which must be answered before the first target build.
 
 **Context.** QNX SDP 8.0 ships GCC 12.2 with libc++ 16; SDP 8.0.2 ships libc++ 18. C++20
 library features (`std::span`, `<format>`, `<ranges>`, `std::jthread`) are incomplete in libc++

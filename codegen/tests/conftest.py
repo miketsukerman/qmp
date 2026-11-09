@@ -29,10 +29,12 @@ def descriptor_set(
     from grpc_tools import protoc  # noqa: PLC0415
 
     out = proto.parent / f".{proto.stem}.pb"
+    wkt = Path(protoc.__file__).parent / "_proto"
     args = [
         "protoc",
         f"-I{UP_SPEC}",
         f"-I{IDL}",
+        f"-I{wkt}",
         *(f"-I{p}" for p in extra_includes),
         "--include_imports",
         "--include_source_info",

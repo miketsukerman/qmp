@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: Apache-2.0
+# Host-side CI: lint, codegen tests, sanitizer matrix, clang-tidy, VERIFY register check.
+# No QNX SDP in CI (licence); the cross build is a manual step documented in README.md.
+name: host
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "codegen[dev]"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-format cppcheck
+      - name: ruff + mypy
+        working-directory: codegen
+        run: |
+          ruff check .
+          ruff format --check .
+          mypy --strict protoc_gen_qmp tests
+      - name: clang-format
+        run: |
+          git ls-files 'include/**/*.h' 'runtime/**/*.c' 'runtime/**/*.h' 'runtime/**/*.cpp' \
+            'examples/**/*.c' 'examples/**/*.h' | xargs clang-format --dry-run -Werror
+      - name: cppcheck
+        run: |
+          cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability \
+            --std=c11 -Iinclude runtime/core runtime/transport/fake examples/joint_demo/joint_service.c
+
+  codegen:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e "codegen[dev]"
+      - name: pytest (goldens, validation errors, C11 + C++17 compile with gcc and clang)
+        working-directory: codegen
+        run: python3 -m pytest tests -q
+      - name: compile generated header standalone as C11 and C++17
+        run: |
+          d=codegen/tests/golden/joint
+          gcc   -x c   -std=c11   -Wall -Wextra -Wpedantic -Werror -Iinclude -I$d -fsyntax-only $d/joint.qmp.c
+          g++   -x c++ -std=c++17 -Wall -Wextra -Werror            -Iinclude -I$d -fsyntax-only $d/joint.qmp.c
+          clang -x c   -std=c11   -Wall -Wextra -Wpedantic -Werror -Iinclude -I$d -fsyntax-only $d/joint.qmp.c
+          clang++ -x c++ -std=c++17 -Wall -Wextra -Werror          -Iinclude -I$d -fsyntax-only $d/joint.qmp.c
+
+  host-build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [debug, asan, ubsan, tsan]
+        compiler: [gcc, clang]
+    env:
+      CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+      CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e codegen
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build protobuf-compiler
+      - name: configure
+        run: cmake --preset host-${{ matrix.sanitizer }}
+      - name: build
+        run: cmake --build build/host-${{ matrix.sanitizer }}
+      - name: test
+        run: ctest --test-dir build/host-${{ matrix.sanitizer }} --output-on-failure
+      - uses: actions/upload-artifact@v4
+        if: matrix.sanitizer == 'debug' && matrix.compiler == 'gcc'
+        with:
+          name: generated-joint
+          path: build/host-debug/gen/joint/
+
+  clang-tidy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e codegen
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build protobuf-compiler clang-tidy
+      - run: cmake --preset host-debug
+      - run: cmake --build build/host-debug --target qmp_test_joint
+      - run: clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c
+
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: every VERIFY() marker in sources has an entry in docs/VERIFY.md
+        run: |
+          set -e
+          ids=$(git grep -ho 'VERIFY([a-z0-9]*): V-[A-Z]*-[0-9]*' -- include runtime codegen cmake idl examples \
+                | sed 's/.*: //' | sort -u)
+          rc=0
+          for id in $ids; do
+            grep -q "| $id " docs/VERIFY.md || { echo "::error::$id used in sources but missing from docs/VERIFY.md"; rc=1; }
+          done
+          exit $rc

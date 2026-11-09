@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "protoc-gen-qmp"
+version = "0.1.0"
+description = "protoc plugin generating C11/C++17 bindings for qmp (QNX message passing)"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = ["protobuf>=5.26,<6", "Jinja2>=3.1,<4"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "types-protobuf", "grpcio-tools>=1.62"]
+
+[project.scripts]
+protoc-gen-qmp = "protoc_gen_qmp.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["protoc_gen_qmp*"]
+
+[tool.setuptools.package-data]
+protoc_gen_qmp = ["templates/*.j2", "py.typed", "_pb/**/*.pyi"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["protoc_gen_qmp/_pb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "S", "PL"]
+ignore = ["S101", "PLR0913", "PLR2004", "PLR0912", "PLR0915", "PLR0911"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S603", "S607"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+exclude = ["protoc_gen_qmp/_pb/"]
+
+[[tool.mypy.overrides]]
+module = "protoc_gen_qmp._pb.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["grpc_tools.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

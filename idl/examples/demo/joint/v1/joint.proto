@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: Apache-2.0
+// Example service used by the codelab, the golden tests and examples/joint_demo.
+syntax = "proto3";
+
+package demo.joint.v1;
+
+import "uprotocol/uoptions.proto";
+import "qmp/options.proto";
+
+// Request for Joint.SetTarget.
+message SetTargetRequest {
+  float position_rad = 1;
+  float max_velocity = 2;
+}
+
+// Reply for Joint.SetTarget.
+message SetTargetReply {
+  int32 result = 1;
+}
+
+// Published on topic StateChanged and returned by GetState.
+message JointState {
+  uint64 seq = 1;
+  uint64 timestamp_ns = 2;
+  float position_rad = 3;
+  float velocity = 4;
+  string mode = 5 [(qmp.max_len) = 16];
+}
+
+// Zero-field message: transmitted as payload_len = 0, no C struct is generated.
+message Empty {}
+
+service Joint {
+  option (uprotocol.service_id) = 0x0101;
+  option (uprotocol.service_name) = "demo.joint.Joint";
+  option (uprotocol.service_version_major) = 1;
+  option (uprotocol.service_version_minor) = 0;
+  option (uprotocol.publish_topic) = {
+    id : 0x8001
+    name : "StateChanged"
+    message : "JointState"
+  };
+  option (qmp.topic_mode) = {
+    topic_id : 0x8001
+    mode : MODE_LATEST
+  };
+
+  rpc SetTarget(SetTargetRequest) returns (SetTargetReply) {
+    option (uprotocol.method_id) = 0x0001;
+  }
+  rpc Stop(Empty) returns (Empty) {
+    option (uprotocol.method_id) = 0x0002;
+    option (qmp.oneway) = true;
+  }
+  rpc GetState(Empty) returns (JointState) {
+    option (uprotocol.method_id) = 0x0003;
+  }
+}

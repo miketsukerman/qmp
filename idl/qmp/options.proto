@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// qmp-specific Protobuf options. Extension numbers 50000-50999 (ADR-005), outside the
+// uProtocol block 51000-51699 reserved in uprotocol/uoptions.proto.
+//
+// Numbers assigned (fixed in ADR-005 §3, do not renumber):
+//   FieldOptions   : max_len = 50001, max_count = 50002
+//   MethodOptions  : oneway = 50010, allow_types = 50011
+//   ServiceOptions : topic_mode = 50020
+syntax = "proto3";
+
+package qmp;
+
+import "google/protobuf/descriptor.proto";
+
+// Delivery mode of a topic (DESIGN §3.5, ADR-003).
+enum Mode {
+  // Default when unset: a single slot, pulses coalesce, the subscriber pulls the newest sample.
+  MODE_LATEST = 0;
+  // Ring buffer of `depth` samples; PULL returns `remaining`; overflow reports DATA_LOSS.
+  MODE_QUEUE = 1;
+}
+
+// Per-topic delivery configuration, attached to the service with (qmp.topic_mode).
+message TopicMode {
+  // Topic id (0x8000-0xFFFF) declared in a (uprotocol.publish_topic) of the same service.
+  uint32 topic_id = 1;
+  Mode mode = 2;
+  // Ring depth for MODE_QUEUE (1..65535). Ignored for MODE_LATEST.
+  uint32 depth = 3;
+}
+
+extend google.protobuf.FieldOptions {
+  // REQUIRED on every string/bytes field: maximum payload length in bytes (1..65535).
+  // Generated as `struct { uint16_t len; char data[max_len]; }`.
+  optional uint32 max_len = 50001;
+  // REQUIRED on every repeated field: maximum element count (1..2^31-1).
+  // Generated as `struct { uint32_t count; uint32_t _pad; T items[max_count]; }`.
+  optional uint32 max_count = 50002;
+}
+
+extend google.protobuf.MethodOptions {
+  // The server replies before running the handler; the reply type must have zero fields.
+  optional bool oneway = 50010;
+  // Security-policy type names allowed to call this method (checked via ConnectClientInfoExt).
+  repeated string allow_types = 50011;
+}
+
+extend google.protobuf.ServiceOptions {
+  // Delivery mode per topic. Topics not listed default to MODE_LATEST.
+  repeated TopicMode topic_mode = 50020;
+}

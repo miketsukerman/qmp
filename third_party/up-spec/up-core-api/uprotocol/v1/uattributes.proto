@@ -1,0 +1,154 @@
+/*
+ * SPDX-FileCopyrightText: 2023 Contributors to the Eclipse Foundation
+ *
+ * See the NOTICE file(s) distributed with this work for additional
+ * information regarding copyright ownership.
+ * 
+ * This program and the accompanying materials are made available under
+ * the terms of the Apache License Version 2.0 which is available at
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * SPDX-FileType: SOURCE
+ * SPDX-License-Identifier: Apache-2.0
+ */
+syntax = "proto3";
+
+package uprotocol.v1;
+
+import "uprotocol/v1/uri.proto";
+import "uprotocol/v1/uuid.proto";
+import "uprotocol/v1/ustatus.proto";
+import "uprotocol/uoptions.proto";
+
+option java_package = "org.eclipse.uprotocol.v1";
+option java_outer_classname = "UAttributesProto";
+option java_multiple_files = true;
+
+// Metadata describing a particular message's purpose, content and processing requirements.
+// Each type of message is described by a set of mandatory and optional attributes.
+message UAttributes {
+    // A unique message identifier.
+    UUID id = 1;
+
+    // This message's type which also indicates its purpose and determines contraints on the other properties.
+    UMessageType type = 2;
+
+    // The origin (address) of this message.
+    UUri source = 3;
+
+    // The destination (address) of this message.
+    UUri sink = 4;
+
+    // The QoS level that this message should be processed/delivered with.
+    UPriority priority = 5;
+
+    // The amount of time (in milliseconds) after which this message MUST NOT be delivered/processed anymore.
+    optional uint32 ttl = 6;
+
+    // The service consumer's permission level.
+    optional uint32 permission_level = 7;
+
+    // A UCode indicating an error that has occurred
+    // during the delivery of either an RPC Request or Response message.
+    optional UCode commstatus = 8;
+
+    // The identifier that a service consumer can use to correlate an RPC Repsonse message with its RPC Request.
+    UUID reqid = 9;
+
+    // The service consumer's access token.
+    optional string token = 10;
+
+    // A tracing identifier to use for correlating messages across the system.
+    // Intended to be compatible with https://github.com/cloudevents/spec/blob/main/cloudevents/extensions/distributed-tracing.md
+    optional string traceparent = 11;
+
+    // The format for the data stored in the UMessage.
+    UPayloadFormat payload_format = 12;
+}
+
+
+// uProtocol defines different types of messages.
+// Using the message type, validation can be performed to ensure transport
+// validity of the data in the {@link UAttributes}.
+enum UMessageType {
+    // Unspecified message type
+    UMESSAGE_TYPE_UNSPECIFIED = 0;
+
+    // Publish
+    // A message that is used to notify all interested consumers of an event that has occurred.
+    UMESSAGE_TYPE_PUBLISH = 1 [(uprotocol.ce_name) = "pub.v1"];
+
+    // RPC Request
+    // A message that is used by a service consumer to invoke one of a service provider's methods with some input data, expecting the service
+    // provider to reply with a response message.
+    UMESSAGE_TYPE_REQUEST = 2 [(uprotocol.ce_name) = "req.v1"];
+
+    // RPC Response
+    // A message that is used by a service provider to send the outcome of processing a request message
+    // from a servcice consumer.
+    UMESSAGE_TYPE_RESPONSE = 3 [(uprotocol.ce_name) = "res.v1"];
+
+    // Notification
+    // A message that is used to inform a specific consumer about an event that has occurred.
+    UMESSAGE_TYPE_NOTIFICATION = 4 [(uprotocol.ce_name) = "not.v1"];
+}
+
+
+// uProtocol Priority as defined in
+// https://github.com/eclipse-uprotocol/up-spec/blob/main/basics/qos.adoc[uProtocol Prioritization]
+enum UPriority {
+    // Unspecified priority
+    UPRIORITY_UNSPECIFIED = 0;
+
+    // Low Priority. No bandwidth assurance such as File Transfer.
+    UPRIORITY_CS0 = 1 [(uprotocol.ce_name) = "CS0"];
+
+    // Standard, undifferentiated application such as General (unclassified).
+    UPRIORITY_CS1 = 2 [(uprotocol.ce_name) = "CS1"];
+
+    // Operations, Administration, and Management such as Streamer messages (sub, connect, etc…)
+    UPRIORITY_CS2 = 3 [(uprotocol.ce_name) = "CS2"];
+
+    // Multimedia streaming such as Video Streaming
+    UPRIORITY_CS3 = 4 [(uprotocol.ce_name) = "CS3"];
+
+    // Real-time interactive such as High priority (rpc events)
+    UPRIORITY_CS4 = 5 [(uprotocol.ce_name) = "CS4"];
+
+    // Signaling such as Important
+    UPRIORITY_CS5 = 6 [(uprotocol.ce_name) = "CS5"];
+
+    // Network control such as Safety Critical
+    UPRIORITY_CS6 = 7 [(uprotocol.ce_name) = "CS6"];
+}
+
+// The format for the data stored in the UMessage.
+enum UPayloadFormat {
+    // Payload format was not is not set,
+    // per specification, assumption is UPAYLOAD_FORMAT_PROTOBUF_WRAPPED_IN_ANY
+    UPAYLOAD_FORMAT_UNSPECIFIED = 0;
+
+    // Payload is an Any protobuf message that contains the packed payload
+    UPAYLOAD_FORMAT_PROTOBUF_WRAPPED_IN_ANY = 1 [ (uprotocol.mime_type) = "application/x-protobuf" ];
+
+    // Protobuf serialization format
+    UPAYLOAD_FORMAT_PROTOBUF = 2 [ (uprotocol.mime_type) = "application/protobuf" ];
+
+    // JSON serialization format
+    UPAYLOAD_FORMAT_JSON = 3 [ (uprotocol.mime_type) = "application/json" ];
+
+    // Basic SOME/IP serialization format
+    UPAYLOAD_FORMAT_SOMEIP = 4 [ (uprotocol.mime_type) = "application/x-someip" ];
+
+    // SOME/IP TLV format
+    UPAYLOAD_FORMAT_SOMEIP_TLV = 5 [ (uprotocol.mime_type) = "application/x-someip_tlv" ];
+
+    // RAW (binary) format
+    UPAYLOAD_FORMAT_RAW = 6 [ (uprotocol.mime_type) = "application/octet-stream" ];
+
+    // Text format
+    UPAYLOAD_FORMAT_TEXT = 7 [ (uprotocol.mime_type) = "text/plain" ];
+
+    // Shared memory format
+    UPAYLOAD_FORMAT_SHM = 8 [ (uprotocol.mime_type) = "application/x-shm" ];
+}

@@ -1,0 +1,4 @@
+* text=auto eol=lf
+codegen/tests/golden/** text eol=lf -diff
+third_party/** linguist-vendored
+codegen/protoc_gen_qmp/_pb/*_pb2.py linguist-generated

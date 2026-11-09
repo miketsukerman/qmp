@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Raspberry Pi 4 / QNX SDP 8.0: qcc -Vgcc_ntoaarch64le, q++ -Vgcc_ntoaarch64le_gpp
+set(QMP_QNX_ARCH aarch64le)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+include("${CMAKE_CURRENT_LIST_DIR}/qnx-common.cmake")

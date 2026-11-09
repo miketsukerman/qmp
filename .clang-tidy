@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Disabled with reasons:
+#   *insecureAPI.DeprecatedOrUnsafeBufferHandling  — memcpy_s/snprintf_s are not in QNX libc or glibc
+#   bugprone-casting-through-void                   — the opaque caller-provided storage pattern
+#                                                      (qmp_client_t -> qmp_client_impl_t) is intentional
+#   performance-no-int-to-ptr                       — (void *)(uintptr_t) is how const is dropped for
+#                                                      iov_base without -Wcast-qual noise
+Checks: >
+  bugprone-*,
+  cert-*,
+  misc-*,
+  performance-*,
+  readability-*,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-casting-through-void,
+  -performance-no-int-to-ptr,
+  -misc-include-cleaner,
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(include|runtime)/'

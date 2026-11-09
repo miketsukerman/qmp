@@ -1,0 +1,55 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "host-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "QMP_BUILD_TESTS": "ON"
+      }
+    },
+    { "name": "host-debug", "inherits": "host-base",
+      "cacheVariables": { "QMP_SANITIZER": "none" } },
+    { "name": "host-asan", "inherits": "host-base",
+      "cacheVariables": { "QMP_SANITIZER": "asan" } },
+    { "name": "host-ubsan", "inherits": "host-base",
+      "cacheVariables": { "QMP_SANITIZER": "ubsan" } },
+    { "name": "host-tsan", "inherits": "host-base",
+      "cacheVariables": { "QMP_SANITIZER": "tsan" } },
+    { "name": "host-release", "inherits": "host-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } },
+    {
+      "name": "qnx-aarch64le",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/qnx-aarch64le.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "QMP_BUILD_TESTS": "ON" }
+    },
+    {
+      "name": "qnx-x86_64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/qnx-x86_64.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "QMP_BUILD_TESTS": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "host-debug", "configurePreset": "host-debug" },
+    { "name": "host-asan", "configurePreset": "host-asan" },
+    { "name": "host-ubsan", "configurePreset": "host-ubsan" },
+    { "name": "host-tsan", "configurePreset": "host-tsan" },
+    { "name": "host-release", "configurePreset": "host-release" },
+    { "name": "qnx-aarch64le", "configurePreset": "qnx-aarch64le" },
+    { "name": "qnx-x86_64", "configurePreset": "qnx-x86_64" }
+  ],
+  "testPresets": [
+    { "name": "host-debug", "configurePreset": "host-debug", "output": { "outputOnFailure": true } },
+    { "name": "host-asan", "configurePreset": "host-asan", "output": { "outputOnFailure": true } },
+    { "name": "host-ubsan", "configurePreset": "host-ubsan", "output": { "outputOnFailure": true } },
+    { "name": "host-tsan", "configurePreset": "host-tsan", "output": { "outputOnFailure": true } }
+  ]
+}

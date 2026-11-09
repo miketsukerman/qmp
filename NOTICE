@@ -1,0 +1,16 @@
+qmp — Service-oriented communication over QNX native message passing
+Copyright 2026 the qmp contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles or depends on the following third-party components:
+
+* Eclipse uProtocol up-spec (third_party/up-spec), Apache-2.0,
+  https://github.com/eclipse-uprotocol/up-spec — tag v1.5.8,
+  commit cab833880c2f1d7965efd507c06446358e2c949f. Only up-core-api/uprotocol/**,
+  LICENSE and NOTICE.md are vendored.
+* Protocol Buffers (build-time dependency of protoc-gen-qmp), BSD-3-Clause.
+* Jinja2 (build-time dependency of protoc-gen-qmp), BSD-3-Clause.
+* GoogleTest (test-only dependency, fetched by CMake when QMP_BUILD_TESTS=ON), BSD-3-Clause.
+* grpcio-tools (developer-only, provides a protoc matching the Python protobuf runtime),
+  Apache-2.0.

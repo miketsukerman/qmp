@@ -206,3 +206,27 @@ macro.
 **Consequences.** + Builds on every 8.0 patch level. + Generated headers stay usable by the widest
 range of integrators. − `std::span`-like helpers must be provided by a tiny `qmp::Span`.
 − Re-evaluate when the project pins SDP ≥ 8.0.2 (record outcome here).
+
+---
+
+## ADR-008 Raspberry Pi 5 as primary target board
+
+**Status:** accepted 2026-11-14.
+
+**Context.** The project originally named the Raspberry Pi 4 (QNX Everywhere image) as the
+QNX SDP 8.0 target. QNX now ships an official SDP 8.0 Quick Start Target Image for the
+Raspberry Pi 5 (package `com.qnx.qnx800.quickstart.rpi5`). Both boards are aarch64le, so the
+`qnx-aarch64le` preset and toolchain file are unchanged.
+
+**Decision.** The **Raspberry Pi 5** running the QNX 8.0 Pi 5 quick-start image is the primary
+target board. Rationale: newer official QNX 8.0 image, faster CPU, demo platform. The
+Raspberry Pi 4 becomes the secondary board, used for one portability and benchmark pass in the
+final week. x86_64 (QEMU) remains the functional-development fallback and is never used for
+headline latency numbers. Bring-up guide: `docs/target/rpi5.md`. No CPU tuning flags are added
+(`-mcpu=cortex-a76` is an open item, V-QNX-029). Unverified image properties are tracked as
+V-QNX-026/027/028/030.
+
+**Consequences.** + Published benchmark numbers are Pi 5 numbers (BENCHMARKS.md records the
+board). + Demo runs on current official QNX hardware support. − Pi 4 gets only one
+portability/benchmark pass in the final week. − Active cooling is required on the Pi 5 for all
+benchmark measurements (thermal throttling, V-QNX-028).

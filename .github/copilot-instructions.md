@@ -21,8 +21,9 @@ Hackathon categories: Best use of QNX-specific Technologies, Developer Tooling &
 Open-Source Contribution, Codelab/Tutorial.
 
 ## Platform facts (QNX SDP 8.0) — treat as constraints
-- Target: Raspberry Pi 4, aarch64le, QNX SDP 8.0 (QNX Everywhere image). Secondary target:
-  x86_64 (QEMU/VM).
+- Target: Raspberry Pi 5 (primary; QNX 8.0 quick-start image, see docs/target/rpi5.md),
+  Raspberry Pi 4 (secondary board), both aarch64le, QNX SDP 8.0. x86_64 (QEMU/VM) is for
+  functional development only.
 - Host: Ubuntu 22.04/24.04. Source qnxsdp-env.sh before building.
 - Toolchain:
   - C: `qcc -Vgcc_ntoaarch64le` (x86_64: `-Vgcc_ntox86_64`)
@@ -192,7 +193,7 @@ Native byte order (single node), 8-byte alignment. The header comes first, then 
 - Check every return value. All received data is untrusted: bounds-check before use.
 - Logging: slog2 on target, stderr on host, behind a qmp_log macro.
 - Server threading: N identical threads RECEIVE-blocked on one channel. Document how N is chosen.
-- Timing: ClockCycles() with SYSPAGE cycles_per_sec on target (VERIFY on RPi4);
+- Timing: ClockCycles() with SYSPAGE cycles_per_sec on target (VERIFY on RPi5, V-QNX-030);
   clock_gettime(CLOCK_MONOTONIC) on host.
 
 ## Build, test, CI

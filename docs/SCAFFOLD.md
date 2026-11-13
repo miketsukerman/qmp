@@ -147,7 +147,7 @@ as a manual step.
 | `clang-tidy` | `run-clang-tidy -p build runtime/core` |
 | `docs` | `markdownlint docs/*.md`; checks every `VERIFY(` in sources has an id present in `docs/VERIFY.md` (small python script) |
 
-Target steps (manual, README): `source ~/qnx800/qnxsdp-env.sh && cmake --preset qnx-aarch64le && cmake --build build/qnx-aarch64le`, `scp` to RPi4, run `qmp_tests` and `examples`.
+Target steps (manual, README): `source ~/qnx800/qnxsdp-env.sh && cmake --preset qnx-aarch64le && cmake --build build/qnx-aarch64le`, then deploy with `scripts/target-run.sh` to the RPi5 (primary board; RPi4 is the secondary board, see `docs/target/rpi5.md`), run `qmp_tests` and `examples`.
 
 ## 5. Lint configs
 

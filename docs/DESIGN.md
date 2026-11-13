@@ -22,7 +22,7 @@ Design answers fixed on 2026-11-09 (Q1–Q6):
 ## 1. Components
 
 ```
- HOST (Ubuntu)                                   TARGET (QNX 8.0, RPi4 / x86_64)
+ HOST (Ubuntu)                                   TARGET (QNX 8.0, RPi5 primary / RPi4 secondary / x86_64)
  ─────────────────────────────                    ──────────────────────────────────────────────────────────
  joint.proto ─┐                                   ┌─ Process A: joint_service (C) ───────────────────────┐
  uoptions.proto├─► protoc ─► protoc-gen-qmp ──┐   │  user code: handlers, publish loop                   │

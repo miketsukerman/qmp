@@ -1,7 +1,7 @@
 Benchmarks, then the demo, then stretch goals in priority order. Post a plan first and wait for
 my OK.
 
-Benchmarks (bench/): same IDL over the qnx and uds transports on the same RPi4, using the C API
+Benchmarks (bench/): same IDL over the qnx and uds transports on the same RPi5, using the C API
 (plus one C++-wrapper run to show its overhead). Output CSV plus a Python plot script.
 - RTT p50/p99/p99.9/max at 16 B, 1 KB, 16 KB and 64 KB; 100k iterations after warm-up.
 - Jitter under CPU load; throughput; CPU cost per call.

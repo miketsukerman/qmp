@@ -56,7 +56,7 @@ service Joint {
 - W2 (Nov 16–22): QNX transport — sync, one-way, deferred, handshake, versioning, lifecycle.
   C++ wrappers.
 - W3 (Nov 23–29): topics (notify-then-pull), UDS transport, qmpctl.
-- W4 (Nov 30–Dec 6): benchmarks including priority inversion, joint demo on RPi4.
+- W4 (Nov 30–Dec 6): benchmarks including priority inversion, joint demo on RPi5.
   Stretch: uProtocol adapter, shm bulk, secpol generation.
 - W5 (Dec 7–13): hardening, docs, codelab, video script, write-up. Demo-ready Dec 10.
 - Buffer: Dec 14–15.

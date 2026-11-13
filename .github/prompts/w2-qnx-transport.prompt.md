@@ -18,5 +18,5 @@ and wait for my OK.
   - kill -9 of the client
   - kill -9 of the server, then restart
   - the full interop matrix (C/C++ client × C/C++ server)
-  Give me exact RPi4 commands and the expected output.
+  Give me exact RPi5 commands (via scripts/target-run.sh) and the expected output.
 - Add result fields to docs/VERIFY.md and write docs/codelab/02-first-service-on-qnx.md.

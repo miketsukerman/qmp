@@ -5,7 +5,7 @@ Prepare the submission. Post a plan first and wait for my OK.
   - zero warnings, sanitizer-clean host run
 - README:
   - 3-sentence pitch and architecture diagram
-  - quick start for host and RPi4
+  - quick start for host and RPi5 (docs/target/rpi5.md); RPi4 portability pass noted as secondary board
   - language bindings (C primary, C++ optional)
   - benchmark table with a methodology link
   - uProtocol compatibility statement: pinned version, what is and isn't supported

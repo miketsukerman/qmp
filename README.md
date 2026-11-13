@@ -80,7 +80,12 @@ same (see `cmake/QmpCodegen.cmake`).
 
 ## QNX target build (manual — no SDP in CI)
 
-Requires QNX SDP 8.0 installed on the host and a Raspberry Pi 4 running the QNX 8.0 image.
+Primary board: **Raspberry Pi 5** with the QNX SDP 8.0 quick-start target image (package
+`com.qnx.qnx800.quickstart.rpi5`); bring-up guide: [`docs/target/rpi5.md`](docs/target/rpi5.md).
+Image details (SDP patch level, security policy) are unverified — see `V-QNX-026`/`V-QNX-027`
+in [`docs/VERIFY.md`](docs/VERIFY.md). Secondary board: Raspberry Pi 4 (one portability and
+benchmark pass in the final week). x86_64 under QEMU is for functional development only — never
+for headline latency numbers. Requires QNX SDP 8.0 installed on the host.
 
 ```sh
 source ~/qnx800/qnxsdp-env.sh
@@ -90,11 +95,12 @@ cmake --build build/qnx-aarch64le
 ```
 
 The QNX native transport (`runtime/transport/qnx/`) arrives in W2; until then the target build
-produces the core library and generated bindings only. Copy and run tests with:
+produces the core library and generated bindings only. Copy and run tests with
+`scripts/target-run.sh` (set `QMP_TARGET` to the board's SSH address first):
 
 ```sh
-scp build/qnx-aarch64le/runtime/tests/qmp_core_tests qnxuser@<rpi>:/tmp/
-ssh qnxuser@<rpi> /tmp/qmp_core_tests
+export QMP_TARGET=qnxuser@<pi5-address>
+scripts/target-run.sh runtime/tests/qmp_core_tests
 ```
 
 Sanitizers on target: `-DQMP_SANITIZER=ubsan` (asan needs the shared runtime; no tsan on QNX —

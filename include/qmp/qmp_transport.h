@@ -84,7 +84,9 @@ typedef struct qmp_transport {
 
 /* In-process transport for unit tests (runtime/transport/fake). Thread-safe. */
 const qmp_transport_t *qmp_transport_fake(void);
-/* qnx on __QNX__ (W2); fake on the host until the uds transport lands (W3). */
+/* Native QNX message passing (runtime/transport/qnx). Only defined on __QNX__. */
+const qmp_transport_t *qmp_transport_qnx(void);
+/* qnx on __QNX__; fake on the host until the uds transport lands (W3). */
 const qmp_transport_t *qmp_transport_default(void);
 
 #ifdef __cplusplus

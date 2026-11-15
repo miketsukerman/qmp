@@ -7,6 +7,11 @@ add_library(qmp STATIC
   core/dispatch.c
   core/server.c
   transport/fake/fake_transport.c)
+if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
+  # Native message passing is the default transport on QNX; the fake stays available
+  # (and selectable) for tests.
+  target_sources(qmp PRIVATE transport/qnx/qnx_transport.c)
+endif()
 add_library(qmp::qmp ALIAS qmp)
 target_include_directories(qmp PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>

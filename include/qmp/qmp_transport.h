@@ -42,16 +42,21 @@ enum qmp_rcv_kind {
 };
 
 typedef struct qmp_rcv_info {
-    int64_t rcvid;      /* reply token; transport-specific                       */
-    int32_t scoid;      /* server-side connection id (QNX) or client slot (fake)  */
-    int32_t pid;        /* sender pid when known, 0 otherwise                     */
-    int32_t priority;   /* sender priority when known, 0 otherwise                */
-    uint32_t msglen;    /* bytes copied into the buffer                           */
-    uint32_t srcmsglen; /* bytes the sender sent (> msglen means truncated)       */
-    uint16_t kind;      /* enum qmp_rcv_kind                                      */
+    int64_t rcvid;       /* reply token; transport-specific                       */
+    int64_t pulse_value; /* 64 bits: QNX 8.0 pulse values are 64-bit              */
+    int32_t scoid;       /* server-side connection id (QNX) or client slot (fake) */
+    int32_t pid;         /* sender pid when known, 0 otherwise                    */
+    int32_t priority;    /* sender priority when known, 0 otherwise               */
+    uint32_t msglen;     /* bytes copied into the buffer                          */
+    uint32_t srcmsglen;  /* bytes the sender sent (> msglen means truncated)      */
+    uint32_t dstmsglen;  /* sender's reply-buffer capacity, 0 when unknown        */
+    uint16_t kind;       /* enum qmp_rcv_kind                                     */
     int8_t pulse_code;
-    uint8_t _pad0;
-    int32_t pulse_value;
+    uint8_t cred_valid; /* uid/gid/type_id below are kernel-supplied             */
+    int32_t uid;        /* effective uid, -1 when unknown                        */
+    int32_t gid;        /* effective gid, -1 when unknown                        */
+    uint32_t type_id;   /* secpol type id, 0 when none/unknown                   */
+    uint32_t _pad0;
 } qmp_rcv_info_t;
 
 typedef struct qmp_transport {

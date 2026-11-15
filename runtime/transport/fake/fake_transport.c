@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <qmp/qmp_transport.h>
 
@@ -296,11 +297,17 @@ static int fake_receive(qmp_endpoint_t *ep_, void *buf, size_t cap, qmp_rcv_info
     memset(info, 0, sizeof(*info));
     info->rcvid = make_rcvid((int)(sl - ep->slots), sl->gen);
     info->scoid = (int32_t)(sl - ep->slots) + 1;
-    info->pid = 0;
+    /* In-process: the sender is this process; credentials mirror ConnectClientInfoExt. */
+    info->pid = (int32_t)getpid();
     info->priority = 0;
     info->msglen = (uint32_t)copied;
     info->srcmsglen = (uint32_t)total;
+    info->dstmsglen = (uint32_t)iov_total(sl->riov, sl->rparts);
     info->kind = QMP_RCV_MESSAGE;
+    info->cred_valid = 1;
+    info->uid = (int32_t)getuid();
+    info->gid = (int32_t)getgid();
+    info->type_id = 0;
     (void)pthread_mutex_unlock(&g_lock);
     return EOK;
 }

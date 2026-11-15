@@ -382,7 +382,7 @@ const qmp_transport_t *qmp_transport_fake(void) {
     return &g_fake;
 }
 
-#if !defined(__QNX__)
+#if !defined(__QNX__) /* on QNX: runtime/transport/qnx/qnx_transport.c */
 const qmp_transport_t *qmp_transport_default(void) {
     return &g_fake; /* W3 replaces this with the uds transport on the host */
 }

@@ -79,7 +79,7 @@ typedef struct qmp_transport {
 
 /* In-process transport for unit tests (runtime/transport/fake). Thread-safe. */
 const qmp_transport_t *qmp_transport_fake(void);
-/* qnx on __QNX__ (W2); fake on the host until the uds transport lands (W3). */
+/* qnx on __QNX__ (ENOSYS stub until W2); fake on the host until the uds transport lands (W3). */
 const qmp_transport_t *qmp_transport_default(void);
 
 #ifdef __cplusplus

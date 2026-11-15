@@ -66,4 +66,5 @@ add_subdirectory(runtime)
 
 if(QMP_BUILD_EXAMPLES)
   add_subdirectory(examples/joint_demo)
+  add_subdirectory(examples/smoke)
 endif()

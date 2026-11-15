@@ -230,3 +230,37 @@ V-QNX-026/027/028/030.
 board). + Demo runs on current official QNX hardware support. − Pi 4 gets only one
 portability/benchmark pass in the final week. − Active cooling is required on the Pi 5 for all
 benchmark measurements (thermal throttling, V-QNX-028).
+
+## ADR-009 Native QNX transport semantics are the reference; the fake transport follows them
+
+**Status:** accepted 2026-11-16.
+
+**Context.** Milestone W2 implemented the native transport
+(`runtime/transport/qnx/qnx_transport.c`) plus the lifecycle features that only make sense
+against kernel semantics: one-way calls, deferred replies with a bounded preallocated table,
+client call timeouts, unblock/disconnect handling, reconnect with generation tracking, and a
+per-method ACL hook fed by kernel credentials. Three design questions had to be settled.
+
+**Decision.**
+1. *Receive info is widened, not duplicated.* `qmp_rcv_info_t` carries 64-bit `rcvid` and
+   `pulse_value` (rcvid_t and pulse values are 64-bit on 8.0, V-QNX-033), the client's
+   reply-buffer capacity `dstmsglen` (V-QNX-032) and kernel-supplied credentials
+   (`uid`/`gid`/`type_id`/`cred_valid`). Every transport fills the same struct; the core never
+   touches QNX headers.
+2. *Lifecycle callbacks live in `qmp_server_cfg_t`, not in generated ops tables.*
+   `acl_check`, `on_cancel` and `on_client_gone` are properties of the server instance, not of
+   one service's methods; the generated ops tables stay pure per-method dispatch. Wiring
+   per-method callbacks through codegen is deferred to the codegen milestone.
+3. *The kernel is the reference implementation.* Wherever the fake transport's behaviour
+   differed from documented 8.0 kernel behaviour, the fake was changed to match, never the
+   core or the native transport: REPLY-blocked clients stay blocked on timeout until the
+   server acts on the `_PULSE_CODE_UNBLOCK` pulse (a late normal reply after the pulse is a
+   *successful* call, V-QNX-006); scoids are per connection; disconnect is delivered as an
+   event after the last connection of a client process closes; pulses are delivered before
+   messages.
+
+**Consequences.** + The conformance suite (`qmp_core_tests`) exercises kernel semantics even
+on the host, so a green host run predicts target behaviour. + No `#ifdef __QNX__` in the core.
+− The fake transport is more complex (connection table, event queue). − `type_id` is 0 until
+`ConnectClientInfoExt` with `_NTO_CLIENTINFO_GETTYPEID` is verified on target (V-QNX-014), so
+`qmp.allow_types` checks cannot be enforced yet — only uid/gid ACLs work today.

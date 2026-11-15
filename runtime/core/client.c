@@ -130,6 +130,36 @@ int qmp_client_call(qmp_client_t *c, uint16_t resource_id, const void *req, size
     return EOK;
 }
 
+int qmp_client_oneway(qmp_client_t *c, uint16_t resource_id, const void *req, size_t req_len,
+                      const qmp_call_opts_t *opts) {
+    if (c == NULL || (req == NULL && req_len != 0) || req_len > QMP_MAX_PAYLOAD) {
+        return EINVAL;
+    }
+    qmp_client_impl_t *ci = impl(c);
+    if (!ci->connected) {
+        return ENOTCONN;
+    }
+    uint64_t timeout_ns = ci->default_timeout_ns;
+    uint8_t up_priority = 0;
+    if (opts != NULL) {
+        if (opts->timeout_ns != 0) {
+            timeout_ns = opts->timeout_ns;
+        }
+        up_priority = opts->up_priority;
+    }
+    qmp_hdr_t req_hdr;
+    qmp_hdr_t rep_hdr;
+    qmp_hdr_init(&req_hdr, ci->service_id, ci->instance_id, resource_id, ci->ver_major,
+                 ci->ver_minor, QMP_F_ONEWAY, (uint32_t)req_len);
+    req_hdr.up_priority = up_priority;
+    int rc = do_call(ci, &req_hdr, req, req_len, &rep_hdr, NULL, 0, timeout_ns);
+    if (rc != EOK) {
+        return rc;
+    }
+    /* The receipt reply is header-only with status 0; anything else is a protocol bug. */
+    return (rep_hdr.status == 0 && rep_hdr.payload_len == 0) ? EOK : EPROTO;
+}
+
 int qmp_client_close(qmp_client_t *c) {
     if (c == NULL) {
         return EINVAL;

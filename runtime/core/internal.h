@@ -36,14 +36,23 @@ QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_client_impl_t) <= QMP_ALIGNOF(qmp_client_t),
                   "qmp_client_t align");
 
 /* ---- request ------------------------------------------------------------ */
+enum qmp_req_state {
+    QMP_REQ_FREE = 0,
+    QMP_REQ_ACTIVE,  /* handler running on a worker                   */
+    QMP_REQ_PARKED,  /* QMP_DEFERRED returned; waiting for the app    */
+    QMP_REQ_CLAIMED, /* reply/cancel in progress, slot pinned         */
+    QMP_REQ_DONE     /* replied while ACTIVE; dispatch frees the slot */
+};
+
 typedef struct qmp_req_impl {
     struct qmp_server_impl *server;
     int64_t rcvid;
     qmp_req_info_t info;
-    uint16_t resource_id;
-    uint8_t deferred; /* W2 */
-    uint8_t _pad0[5];
-    uint64_t _reserved[3]; /* W2: deferred-reply bookkeeping */
+    qmp_hdr_t h;       /* request header, needed to build the deferred reply */
+    uint32_t out_size; /* method's reply payload size                        */
+    uint8_t state;     /* enum qmp_req_state; pool slots guarded by pool_mu  */
+    uint8_t pooled;    /* 0: stack storage inside dispatch (sync only)       */
+    uint8_t _pad0[2];
 } qmp_req_impl_t;
 QMP_STATIC_ASSERT(sizeof(qmp_req_impl_t) <= sizeof(qmp_req_t), "qmp_req_t too small");
 QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_req_impl_t) <= QMP_ALIGNOF(qmp_req_t), "qmp_req_t align");
@@ -67,6 +76,14 @@ typedef struct qmp_server_impl {
     uint8_t _pad0[2];
     pthread_t workers[QMP_SERVER_MAX_THREADS];
     char path[QMP_NAME_MAX];
+    /* Deferred-reply pool (caller storage) and lifecycle callbacks (cfg). pool_mu guards
+     * slot states only; it is never held across a reply or a callback. */
+    pthread_mutex_t pool_mu;
+    qmp_req_impl_t *pool;
+    size_t pool_count;
+    int (*acl_check)(void *ctx, const qmp_cred_t *cred, uint16_t resource_id);
+    void (*on_cancel)(void *ctx, qmp_req_t *req);
+    void (*on_client_gone)(void *ctx, int32_t pid);
 } qmp_server_impl_t;
 QMP_STATIC_ASSERT(sizeof(qmp_server_impl_t) <= sizeof(qmp_server_t), "qmp_server_t too small");
 QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_server_impl_t) <= QMP_ALIGNOF(qmp_server_t),
@@ -82,6 +99,10 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
  * run and sets *out_m; else the errno the client must receive. */
 int qmp_dispatch_lookup(const qmp_service_desc_t *desc, uint16_t instance_id, const qmp_hdr_t *h,
                         const qmp_method_desc_t **out_m);
+
+/* Lifecycle events from the transport (worker thread). */
+void qmp_server_on_unblock(qmp_server_impl_t *s, int64_t rcvid);
+void qmp_server_on_disconnect(qmp_server_impl_t *s, int32_t scoid, int32_t pid);
 
 #ifdef __cplusplus
 }

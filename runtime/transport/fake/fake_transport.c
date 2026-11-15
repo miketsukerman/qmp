@@ -21,13 +21,15 @@
 
 #define QMP_FAKE_MAX_ENDPOINTS 8
 #define QMP_FAKE_MAX_SLOTS     16
+#define QMP_FAKE_MAX_CONNS     16
+#define QMP_FAKE_MAX_EVENTS    32
 
 enum slot_state {
     SLOT_FREE = 0,
     SLOT_PENDING,  /* client posted, waiting for a receiver   */
     SLOT_RECEIVED, /* a server thread took it                 */
     SLOT_DONE,     /* server replied / errored; client wakes  */
-    SLOT_ABANDONED /* client timed out while RECEIVED         */
+    SLOT_ABANDONED /* client gave up while RECEIVED           */
 };
 
 typedef struct slot {
@@ -39,8 +41,17 @@ typedef struct slot {
     int rparts;
     size_t reply_len;
     int err; /* 0 = replied, else errno for the client */
-    int client_pid;
+    int32_t scoid;
+    bool unblock_sent; /* the timeout already queued an UNBLOCK event */
 } slot_t;
+
+/* Lifecycle events (unblock/disconnect pulses on QNX), delivered before messages. */
+typedef struct fake_event {
+    uint16_t kind; /* enum qmp_rcv_kind */
+    int32_t scoid;
+    int32_t pid;
+    int64_t rcvid;
+} fake_event_t;
 
 typedef struct endpoint {
     bool used;
@@ -48,6 +59,11 @@ typedef struct endpoint {
     uint32_t gen; /* bumped on every listen(): detects stale connections */
     char path[QMP_NAME_MAX];
     slot_t slots[QMP_FAKE_MAX_SLOTS];
+    int32_t scoid_seq;
+    bool conns[QMP_FAKE_MAX_CONNS]; /* indexed by scoid - 1 (mod table) */
+    fake_event_t evq[QMP_FAKE_MAX_EVENTS];
+    int ev_head;
+    int ev_count;
     pthread_cond_t cv_server; /* signalled when a slot becomes PENDING or on shutdown */
     pthread_cond_t cv_client; /* broadcast when any slot becomes DONE                 */
 } endpoint_t;
@@ -70,6 +86,7 @@ static void init_locked(void) {
 typedef struct conn_impl {
     int ep_index;
     uint32_t ep_gen;
+    int32_t scoid; /* 0 = not connected */
 } conn_impl_t;
 QMP_STATIC_ASSERT(sizeof(conn_impl_t) <= sizeof(qmp_conn_t), "conn storage");
 
@@ -139,6 +156,20 @@ static int64_t make_rcvid(int slot, uint32_t gen) {
     return ((int64_t)gen << 16) | (int64_t)slot;
 }
 
+/* g_lock held. Drops the event when the queue is full (tests never get close). */
+static void push_event(endpoint_t *ep, uint16_t kind, int32_t scoid, int32_t pid, int64_t rcvid) {
+    if (ep->ev_count >= QMP_FAKE_MAX_EVENTS) {
+        return;
+    }
+    fake_event_t *ev = &ep->evq[(ep->ev_head + ep->ev_count) % QMP_FAKE_MAX_EVENTS];
+    ev->kind = kind;
+    ev->scoid = scoid;
+    ev->pid = pid;
+    ev->rcvid = rcvid;
+    ep->ev_count++;
+    (void)pthread_cond_broadcast(&ep->cv_server);
+}
+
 /* ---- client ------------------------------------------------------------- */
 static int fake_connect(qmp_conn_t *conn, const char *path) {
     conn_impl_t *c = (conn_impl_t *)(void *)conn;
@@ -149,8 +180,25 @@ static int fake_connect(qmp_conn_t *conn, const char *path) {
     if (ep == NULL || ep->shutdown) {
         rc = ENOENT;
     } else {
-        c->ep_index = (int)(ep - g_eps);
-        c->ep_gen = ep->gen;
+        int32_t scoid = 0;
+        for (int i = 0; i < QMP_FAKE_MAX_CONNS; i++) {
+            int32_t cand = ++ep->scoid_seq;
+            if (cand <= 0) { /* wrapped */
+                cand = ep->scoid_seq = 1;
+            }
+            if (!ep->conns[(cand - 1) % QMP_FAKE_MAX_CONNS]) {
+                scoid = cand;
+                ep->conns[(cand - 1) % QMP_FAKE_MAX_CONNS] = true;
+                break;
+            }
+        }
+        if (scoid == 0) {
+            rc = EAGAIN;
+        } else {
+            c->ep_index = (int)(ep - g_eps);
+            c->ep_gen = ep->gen;
+            c->scoid = scoid;
+        }
     }
     (void)pthread_mutex_unlock(&g_lock);
     return rc;
@@ -195,7 +243,8 @@ static int fake_call(qmp_conn_t *conn, const qmp_iov_t *siov, int sparts, const 
     sl->rparts = rparts;
     sl->reply_len = 0;
     sl->err = 0;
-    sl->client_pid = 0;
+    sl->scoid = c->scoid;
+    sl->unblock_sent = false;
     (void)pthread_cond_signal(&ep->cv_server);
 
     struct timespec deadline;
@@ -208,11 +257,21 @@ static int fake_call(qmp_conn_t *conn, const qmp_iov_t *siov, int sparts, const 
             rc = ESRCH; /* server died while we were blocked */
             break;
         }
-        int w = timeout_ns != 0 ? pthread_cond_timedwait(&ep->cv_client, &g_lock, &deadline)
-                                : pthread_cond_wait(&ep->cv_client, &g_lock);
-        if (w == ETIMEDOUT && sl->state != SLOT_DONE) {
-            rc = ETIMEDOUT;
-            break;
+        if (timeout_ns != 0 && !sl->unblock_sent) {
+            int w = pthread_cond_timedwait(&ep->cv_client, &g_lock, &deadline);
+            if (w == ETIMEDOUT && sl->state != SLOT_DONE) {
+                if (sl->state == SLOT_PENDING) {
+                    rc = ETIMEDOUT; /* SEND-blocked: the kernel unblocks us directly */
+                    break;
+                }
+                /* REPLY-blocked: the kernel delivers an unblock pulse and keeps the
+                 * client blocked until the server replies or errors (V-QNX-006). */
+                sl->unblock_sent = true;
+                push_event(ep, QMP_RCV_UNBLOCK, sl->scoid, (int32_t)getpid(),
+                           make_rcvid((int)(sl - ep->slots), sl->gen));
+            }
+        } else {
+            (void)pthread_cond_wait(&ep->cv_client, &g_lock);
         }
     }
     if (rc == EOK) {
@@ -232,7 +291,20 @@ static int fake_call(qmp_conn_t *conn, const qmp_iov_t *siov, int sparts, const 
 
 static int fake_disconnect(qmp_conn_t *conn) {
     conn_impl_t *c = (conn_impl_t *)(void *)conn;
+    (void)pthread_mutex_lock(&g_lock);
+    if (c->ep_index >= 0 && c->scoid > 0) {
+        endpoint_t *ep = &g_eps[c->ep_index];
+        if (ep->used && ep->gen == c->ep_gen) {
+            ep->conns[(c->scoid - 1) % QMP_FAKE_MAX_CONNS] = false;
+            if (!ep->shutdown) {
+                /* Last connection of this "process": the disconnect pulse. */
+                push_event(ep, QMP_RCV_DISCONNECT, c->scoid, (int32_t)getpid(), 0);
+            }
+        }
+    }
+    (void)pthread_mutex_unlock(&g_lock);
     c->ep_index = -1;
+    c->scoid = 0;
     return EOK;
 }
 
@@ -263,6 +335,11 @@ static int fake_listen(qmp_endpoint_t *ep_, const char *path) {
     ep->shutdown = false;
     ep->gen++;
     memset(ep->slots, 0, sizeof(ep->slots));
+    memset(ep->conns, 0, sizeof(ep->conns));
+    memset(ep->evq, 0, sizeof(ep->evq));
+    ep->scoid_seq = 0;
+    ep->ev_head = 0;
+    ep->ev_count = 0;
     strncpy(ep->path, path, sizeof(ep->path) - 1);
     ep->path[sizeof(ep->path) - 1] = '\0';
     e->ep_index = (int)(ep - g_eps);
@@ -280,6 +357,18 @@ static int fake_receive(qmp_endpoint_t *ep_, void *buf, size_t cap, qmp_rcv_info
             (void)pthread_mutex_unlock(&g_lock);
             return ECANCELED;
         }
+        if (ep->ev_count > 0) { /* pulses before messages, like MsgReceive */
+            fake_event_t ev = ep->evq[ep->ev_head];
+            ep->ev_head = (ep->ev_head + 1) % QMP_FAKE_MAX_EVENTS;
+            ep->ev_count--;
+            (void)pthread_mutex_unlock(&g_lock);
+            memset(info, 0, sizeof(*info));
+            info->kind = ev.kind;
+            info->scoid = ev.scoid;
+            info->pid = ev.pid;
+            info->rcvid = ev.rcvid;
+            return EOK;
+        }
         for (int i = 0; i < QMP_FAKE_MAX_SLOTS; i++) {
             if (ep->slots[i].state == SLOT_PENDING) {
                 sl = &ep->slots[i];
@@ -296,7 +385,7 @@ static int fake_receive(qmp_endpoint_t *ep_, void *buf, size_t cap, qmp_rcv_info
     size_t copied = iov_gather(sl->siov, sl->sparts, (uint8_t *)buf, cap);
     memset(info, 0, sizeof(*info));
     info->rcvid = make_rcvid((int)(sl - ep->slots), sl->gen);
-    info->scoid = (int32_t)(sl - ep->slots) + 1;
+    info->scoid = sl->scoid;
     /* In-process: the sender is this process; credentials mirror ConnectClientInfoExt. */
     info->pid = (int32_t)getpid();
     info->priority = 0;

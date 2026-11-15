@@ -10,6 +10,25 @@
 
 namespace {
 
+// cfg structs grow trailing fields over time; build them by member to keep
+// -Wmissing-field-initializers happy.
+inline qmp_server_cfg_t server_cfg(const qmp_transport_t *tr, int nthreads, void *buf,
+                                   size_t size) {
+    qmp_server_cfg_t cfg{};
+    cfg.transport = tr;
+    cfg.nthreads = nthreads;
+    cfg.workbuf = buf;
+    cfg.workbuf_size = size;
+    return cfg;
+}
+
+inline qmp_client_cfg_t client_cfg(const qmp_transport_t *tr, uint64_t timeout_ns) {
+    qmp_client_cfg_t cfg{};
+    cfg.transport = tr;
+    cfg.default_timeout_ns = timeout_ns;
+    return cfg;
+}
+
 qmp_hdr_t hdr(uint16_t resource, uint32_t payload_len,
               uint16_t svc = DEMO_JOINT_V1_JOINT_SERVICE_ID, uint16_t inst = 0, uint8_t major = 1) {
     qmp_hdr_t h;
@@ -66,7 +85,7 @@ TEST(Dispatch, GeneratedValidatorBoundsString) {
 TEST(Dispatch, RegisterRejectsUnsortedTable) {
     alignas(8) unsigned char buf[QMP_SERVER_WORKBUF_SIZE(72, 1)];
     qmp_server_t s;
-    qmp_server_cfg_t cfg{qmp_transport_fake(), 1, buf, sizeof(buf)};
+    qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), 1, buf, sizeof(buf));
     ASSERT_EQ(qmp_server_init(&s, &cfg), EOK);
     qmp_method_desc_t bad[2] = {demo_joint_v1_Joint_desc.methods[2],
                                 demo_joint_v1_Joint_desc.methods[0]};
@@ -80,7 +99,7 @@ TEST(Dispatch, RegisterRejectsUnsortedTable) {
 TEST(Dispatch, RegisterRejectsSmallWorkbuf) {
     alignas(8) unsigned char buf[16];
     qmp_server_t s;
-    qmp_server_cfg_t cfg{qmp_transport_fake(), 1, buf, sizeof(buf)};
+    qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), 1, buf, sizeof(buf));
     ASSERT_EQ(qmp_server_init(&s, &cfg), EOK);
     demo_joint_v1_Joint_ops ops{};
     EXPECT_EQ(demo_joint_v1_Joint_register(&s, 0, &ops, nullptr), EMSGSIZE);

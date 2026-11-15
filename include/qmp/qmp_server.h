@@ -25,8 +25,8 @@ typedef struct qmp_server {
     uint64_t _storage[QMP_SERVER_STORAGE_U64];
 } qmp_server_t;
 
-/* One in-flight request. Valid inside the handler; after QMP_DEFERRED (W2) until replied,
- * cancelled or the client disconnects. */
+/* One in-flight request. Valid inside the handler; after QMP_DEFERRED until it is
+ * replied with qmp_req_reply(), cancelled (on_cancel) or the client disconnects. */
 typedef struct qmp_req {
     uint64_t _storage[QMP_REQ_STORAGE_U64];
 } qmp_req_t;
@@ -39,6 +39,15 @@ typedef struct qmp_req_info {
     uint8_t ver_minor;   /* client's minor version                         */
     uint8_t _pad0[2];
 } qmp_req_info_t;
+
+/* Kernel-supplied caller identity for the ACL hook. On QNX this comes from
+ * ConnectClientInfo, cached per scoid; the fake transport reports the test process. */
+typedef struct qmp_cred {
+    int32_t pid;
+    int32_t uid;      /* effective uid, -1 when the transport has no credentials */
+    int32_t gid;      /* effective gid, -1 when the transport has no credentials */
+    uint32_t type_id; /* secpol type id, 0 = none/unknown (V-QNX-014)            */
+} qmp_cred_t;
 
 /* Generated trampoline: casts `ops` to the typed ops table and `in`/`out` to the payload
  * structs. Returns QMP_HANDLED, QMP_DEFERRED or a positive errno. */
@@ -79,6 +88,27 @@ typedef struct qmp_server_cfg {
      * Use QMP_SERVER_WORKBUF_SIZE(). Must be 8-byte aligned. */
     void *workbuf;
     size_t workbuf_size;
+
+    /* Deferred replies (DESIGN §3.3). Handlers may return QMP_DEFERRED only when a pool
+     * is configured: caller-provided qmp_req_t storage, 8-byte aligned, bounded. When the
+     * pool is full the call fails with EAGAIN at the client. NULL = deferral disabled. */
+    qmp_req_t *deferred_pool;
+    size_t deferred_count;
+
+    /* Per-method ACL hook. Called on the worker thread (caller's priority) after header
+     * validation and before the handler, with kernel-supplied credentials cached per
+     * scoid. Return EOK to allow; anything else sends EACCES. NULL = allow everything.
+     * Policy (qmp.allow_types, permission levels) is layered on top of this hook. */
+    int (*acl_check)(void *ctx, const qmp_cred_t *cred, uint16_t resource_id);
+
+    /* A parked deferred request was cancelled: the client timed out (kernel unblock
+     * pulse) or its process disconnected. The req pointer is invalid once this returns;
+     * do not call qmp_req_reply() on it. Worker thread. NULL = no notification. */
+    void (*on_cancel)(void *ctx, qmp_req_t *req);
+
+    /* A client process closed its last connection (QNX disconnect pulse). The runtime
+     * has already dropped its parked requests (each with on_cancel). Worker thread. */
+    void (*on_client_gone)(void *ctx, int32_t pid);
 } qmp_server_cfg_t;
 
 #define QMP_SERVER_WORKBUF_SIZE(max_msg_size, nthreads)                                            \
@@ -105,6 +135,13 @@ uint32_t qmp_server_generation(const qmp_server_t *s);
 
 /* Inside a handler: information about the caller. */
 int qmp_req_get_info(const qmp_req_t *req, qmp_req_info_t *info);
+
+/* Complete a request whose handler returned QMP_DEFERRED. Any thread. status == 0
+ * requires payload_len == the method's reply size; status != 0 requires payload_len == 0.
+ * Returns EOK (a client that died meanwhile counts as delivered), EINVAL if the request
+ * was already completed or cancelled. After EOK or on_cancel the pointer is dead: using
+ * it again is undefined, like a double free. Never blocks on the client. */
+int qmp_req_reply(qmp_req_t *req, const void *payload, size_t payload_len, int32_t status);
 
 #ifdef __cplusplus
 }

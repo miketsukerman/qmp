@@ -87,7 +87,10 @@ int main(int argc, char **argv) {
     ops.GetState = on_get_state;
 
     qmp_server_t server;
-    qmp_server_cfg_t cfg = {NULL, NTHREADS, g_workbuf, sizeof(g_workbuf)};
+    qmp_server_cfg_t cfg = {.transport = NULL,
+                            .nthreads = NTHREADS,
+                            .workbuf = g_workbuf,
+                            .workbuf_size = sizeof(g_workbuf)};
     int rc = qmp_server_init(&server, &cfg);
     if (rc == EOK) {
         rc = demo_joint_v1_Joint_register(&server, 0, &ops, &model);

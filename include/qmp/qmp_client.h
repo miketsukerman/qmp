@@ -41,6 +41,13 @@ int qmp_client_connect(qmp_client_t *c, uint16_t service_id, uint16_t instance_i
 int qmp_client_call(qmp_client_t *c, uint16_t resource_id, const void *req, size_t req_len,
                     void *rep, size_t rep_cap, int32_t *status, const qmp_call_opts_t *opts);
 
+/* One-way method call (DESIGN §3.4). The server replies (header only) on receipt, before
+ * running the handler, so priority inheritance covers only the delivery. No application
+ * status comes back; delivery failures return an errno (ETIMEDOUT, ESRCH, EACCES, ...).
+ * Blocking: yes, until the receipt reply. Thread: caller's. */
+int qmp_client_oneway(qmp_client_t *c, uint16_t resource_id, const void *req, size_t req_len,
+                      const qmp_call_opts_t *opts);
+
 /* Disconnect. Safe to call on a never-connected client. */
 int qmp_client_close(qmp_client_t *c);
 

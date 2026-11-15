@@ -28,6 +28,21 @@ int qmp_server_init(qmp_server_t *s, const qmp_server_cfg_t *cfg) {
     si->nthreads = (uint8_t)(cfg->nthreads == 0 ? 4 : cfg->nthreads);
     si->workbuf = (uint8_t *)cfg->workbuf;
     si->workbuf_size = cfg->workbuf_size;
+    if (cfg->deferred_pool != NULL) {
+        if (cfg->deferred_count == 0 || ((uintptr_t)cfg->deferred_pool & 7U) != 0) {
+            return EINVAL;
+        }
+        memset(cfg->deferred_pool, 0, cfg->deferred_count * sizeof(qmp_req_t));
+        si->pool = (qmp_req_impl_t *)(void *)cfg->deferred_pool;
+        si->pool_count = cfg->deferred_count;
+    }
+    si->acl_check = cfg->acl_check;
+    si->on_cancel = cfg->on_cancel;
+    si->on_client_gone = cfg->on_client_gone;
+    int mrc = pthread_mutex_init(&si->pool_mu, NULL);
+    if (mrc != 0) {
+        return mrc;
+    }
     /* Generation changes on every restart so clients can detect it (DESIGN §3.6). Low
      * bits of the monotonic clock in ms mixed with the object address; never 0. */
     struct timespec ts;
@@ -98,10 +113,13 @@ static void worker_loop(qmp_server_impl_t *s, unsigned index) {
             qmp_log("receive failed: %d", rc);
             continue;
         }
-        if (info.kind != QMP_RCV_MESSAGE) {
-            continue; /* pulses / lifecycle: W2 */
-        }
-        qmp_server_dispatch(s, &info, rcv, info.msglen, rep, s->max_msg_size);
+        if (info.kind == QMP_RCV_MESSAGE) {
+            qmp_server_dispatch(s, &info, rcv, info.msglen, rep, s->max_msg_size);
+        } else if (info.kind == QMP_RCV_UNBLOCK) {
+            qmp_server_on_unblock(s, info.rcvid);
+        } else if (info.kind == QMP_RCV_DISCONNECT) {
+            qmp_server_on_disconnect(s, info.scoid, info.pid);
+        } /* QMP_RCV_PULSE and unknown kinds: ignore */
     }
 }
 

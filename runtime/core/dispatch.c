@@ -33,8 +33,11 @@ int qmp_dispatch_lookup(const qmp_service_desc_t *desc, uint16_t instance_id, co
     if (h->payload_len != m->in_size) {
         return EINVAL;
     }
-    if ((m->flags & QMP_MF_ONEWAY) != 0 || m->handler == NULL) {
-        return ENOSYS; /* one-way dispatch arrives in W3 */
+    if (m->handler == NULL) {
+        return ENOSYS; /* declared but not implemented */
+    }
+    if (((h->flags & QMP_F_ONEWAY) != 0) != ((m->flags & QMP_MF_ONEWAY) != 0)) {
+        return EINVAL; /* the one-way flag must match the method's declaration */
     }
     *out_m = m;
     return EOK;
@@ -86,6 +89,48 @@ static void handle_control(qmp_server_impl_t *s, const qmp_rcv_info_t *info, con
     send_reply(s, info->rcvid, rh, rep + QMP_HDR_SIZE, sizeof(hr));
 }
 
+/* ---- deferred-reply pool (slots live in caller-provided cfg storage) ----- */
+static qmp_req_impl_t *pool_alloc(qmp_server_impl_t *s) {
+    if (s->pool == NULL) {
+        return NULL;
+    }
+    qmp_req_impl_t *r = NULL;
+    (void)pthread_mutex_lock(&s->pool_mu);
+    for (size_t i = 0; i < s->pool_count; i++) {
+        if (s->pool[i].state == QMP_REQ_FREE) {
+            s->pool[i].state = QMP_REQ_ACTIVE;
+            r = &s->pool[i];
+            break;
+        }
+    }
+    (void)pthread_mutex_unlock(&s->pool_mu);
+    return r;
+}
+
+static void pool_set_state(qmp_server_impl_t *s, qmp_req_impl_t *r, uint8_t state) {
+    (void)pthread_mutex_lock(&s->pool_mu);
+    r->state = state;
+    (void)pthread_mutex_unlock(&s->pool_mu);
+}
+
+static void fill_req(qmp_req_impl_t *req, qmp_server_impl_t *s, const qmp_rcv_info_t *info,
+                     const qmp_hdr_t *h, uint32_t out_size, uint8_t pooled) {
+    req->server = s;
+    req->rcvid = info->rcvid;
+    req->info.pid = info->pid;
+    req->info.scoid = info->scoid;
+    req->info.priority = info->priority;
+    req->info.up_priority = h->up_priority;
+    req->info.ver_minor = h->ver_minor;
+    req->info._pad0[0] = 0;
+    req->info._pad0[1] = 0;
+    req->h = *h;
+    req->out_size = out_size;
+    req->pooled = pooled;
+    req->_pad0[0] = 0;
+    req->_pad0[1] = 0;
+}
+
 void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8_t *rcv, size_t len,
                          uint8_t *rep, size_t rep_cap) {
     if (info->srcmsglen > len) {
@@ -113,8 +158,24 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
         send_error(s, info->rcvid, rc);
         return;
     }
+    if (s->acl_check != NULL) {
+        qmp_cred_t cred = {info->pid, info->cred_valid != 0 ? info->uid : -1,
+                           info->cred_valid != 0 ? info->gid : -1, info->type_id};
+        if (s->acl_check(s->ctx, &cred, h.resource_id) != EOK) {
+            send_error(s, info->rcvid, EACCES);
+            return;
+        }
+    }
+    int oneway = (m->flags & QMP_MF_ONEWAY) != 0;
     if (QMP_HDR_SIZE + (size_t)m->out_size > rep_cap) {
         send_error(s, info->rcvid, EMSGSIZE); /* cannot happen with a sized work buffer */
+        return;
+    }
+    /* The kernel silently truncates a reply to the client's buffer (V-QNX-032): detect an
+     * undersized buffer here instead of letting the client read a cut struct. */
+    if (!oneway && info->dstmsglen != 0 &&
+        (size_t)info->dstmsglen < QMP_HDR_SIZE + (size_t)m->out_size) {
+        send_error(s, info->rcvid, EMSGSIZE);
         return;
     }
     const void *in = m->in_size > 0 ? rcv + QMP_HDR_SIZE : NULL;
@@ -122,28 +183,60 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
         send_error(s, info->rcvid, ERANGE);
         return;
     }
-    qmp_req_t req_storage;
-    qmp_req_impl_t *req = (qmp_req_impl_t *)(void *)&req_storage;
-    memset(req, 0, sizeof(*req));
-    req->server = s;
-    req->rcvid = info->rcvid;
-    req->resource_id = h.resource_id;
-    req->info.pid = info->pid;
-    req->info.scoid = info->scoid;
-    req->info.priority = info->priority;
-    req->info.up_priority = h.up_priority;
-    req->info.ver_minor = h.ver_minor;
-
     qmp_hdr_t *rh = (qmp_hdr_t *)(void *)rep;
+    if (oneway) {
+        /* Reply BEFORE the work so the caller is unblocked and priority inheritance ends
+         * with the delivery (DESIGN §3.4). The handler gets no reply buffer. */
+        qmp_hdr_init_reply(rh, &h, 0, 0);
+        send_reply(s, info->rcvid, rh, NULL, 0);
+        qmp_req_t req_storage;
+        qmp_req_impl_t *req = (qmp_req_impl_t *)(void *)&req_storage;
+        memset(req, 0, sizeof(*req));
+        fill_req(req, s, info, &h, 0, 0);
+        req->state = QMP_REQ_ACTIVE;
+        int32_t status = 0;
+        rc = m->handler(s->ops, s->ctx, &req_storage, in, NULL, &status);
+        if (rc == QMP_DEFERRED) {
+            qmp_log("one-way handler for 0x%04x returned QMP_DEFERRED; ignored",
+                    (unsigned)h.resource_id);
+        }
+        return;
+    }
+    /* Allocate the request from the deferred pool when one is configured, so the pointer
+     * the handler keeps across QMP_DEFERRED stays valid. Pool missing or full: the slot
+     * lives on this stack and QMP_DEFERRED degrades to EAGAIN at the client. */
+    qmp_req_t req_storage;
+    qmp_req_impl_t *req = pool_alloc(s);
+    uint8_t pooled = req != NULL;
+    if (!pooled) {
+        req = (qmp_req_impl_t *)(void *)&req_storage;
+        memset(req, 0, sizeof(*req));
+        req->state = QMP_REQ_ACTIVE;
+    }
+    fill_req(req, s, info, &h, m->out_size, pooled);
+
     void *out = m->out_size > 0 ? rep + QMP_HDR_SIZE : NULL;
     if (out != NULL) {
         memset(out, 0, m->out_size); /* padding bytes are zero on the wire */
     }
     int32_t status = 0;
-    rc = m->handler(s->ops, s->ctx, &req_storage, in, out, &status);
+    rc = m->handler(s->ops, s->ctx, (qmp_req_t *)(void *)req, in, out, &status);
     if (rc == QMP_DEFERRED) {
-        send_error(s, info->rcvid, ENOSYS); /* deferred replies arrive in W2 */
+        if (!pooled) {
+            send_error(s, info->rcvid, EAGAIN);
+            return;
+        }
+        (void)pthread_mutex_lock(&s->pool_mu);
+        if (req->state == QMP_REQ_ACTIVE) {
+            req->state = QMP_REQ_PARKED; /* qmp_req_reply()/cancel own it from here */
+        } else if (req->state == QMP_REQ_DONE) {
+            req->state = QMP_REQ_FREE; /* qmp_req_reply() already ran inside the handler */
+        }
+        (void)pthread_mutex_unlock(&s->pool_mu);
         return;
+    }
+    if (pooled) {
+        pool_set_state(s, req, QMP_REQ_FREE);
     }
     if (rc != QMP_HANDLED) {
         send_error(s, info->rcvid, rc > 0 ? rc : EIO);
@@ -152,6 +245,92 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
     uint32_t payload_len = status == 0 ? m->out_size : 0;
     qmp_hdr_init_reply(rh, &h, status, payload_len);
     send_reply(s, info->rcvid, rh, out, payload_len);
+}
+
+int qmp_req_reply(qmp_req_t *req, const void *payload, size_t payload_len, int32_t status) {
+    if (req == NULL || (payload == NULL && payload_len != 0)) {
+        return EINVAL;
+    }
+    qmp_req_impl_t *r = (qmp_req_impl_t *)(void *)req;
+    qmp_server_impl_t *s = r->server;
+    if (s == NULL || r->pooled == 0) {
+        return EINVAL; /* only deferrable (pooled) requests can be replied late */
+    }
+    if (status == 0 ? payload_len != r->out_size : payload_len != 0) {
+        return EINVAL;
+    }
+    (void)pthread_mutex_lock(&s->pool_mu);
+    uint8_t prev = r->state;
+    if (prev != QMP_REQ_ACTIVE && prev != QMP_REQ_PARKED) {
+        (void)pthread_mutex_unlock(&s->pool_mu);
+        return EINVAL; /* already completed or cancelled */
+    }
+    r->state = QMP_REQ_CLAIMED;
+    (void)pthread_mutex_unlock(&s->pool_mu);
+
+    qmp_hdr_t rh;
+    qmp_hdr_init_reply(&rh, &r->h, status, (uint32_t)payload_len);
+    send_reply(s, r->rcvid, &rh, payload, payload_len); /* dead client == delivered */
+    /* ACTIVE: the handler still holds the slot; dispatch frees it after QMP_DEFERRED. */
+    pool_set_state(s, r, prev == QMP_REQ_ACTIVE ? QMP_REQ_DONE : QMP_REQ_FREE);
+    return EOK;
+}
+
+/* Claim one PARKED slot matching the predicate; NULL when none. pool_mu held inside. */
+static qmp_req_impl_t *claim_parked(qmp_server_impl_t *s, int by_rcvid, int64_t rcvid,
+                                    int32_t scoid) {
+    if (s->pool == NULL) {
+        return NULL;
+    }
+    qmp_req_impl_t *r = NULL;
+    (void)pthread_mutex_lock(&s->pool_mu);
+    for (size_t i = 0; i < s->pool_count; i++) {
+        qmp_req_impl_t *p = &s->pool[i];
+        if (p->state != QMP_REQ_PARKED) {
+            continue;
+        }
+        if (by_rcvid ? p->rcvid == rcvid : p->info.scoid == scoid) {
+            p->state = QMP_REQ_CLAIMED;
+            r = p;
+            break;
+        }
+    }
+    (void)pthread_mutex_unlock(&s->pool_mu);
+    return r;
+}
+
+void qmp_server_on_unblock(qmp_server_impl_t *s, int64_t rcvid) {
+    /* Parked request: cancel it and release the client with ETIMEDOUT. Not parked: a
+     * sync handler is still running and its normal reply releases the client, or the
+     * request is already gone — either way the kernel keeps the client blocked until the
+     * server acts, so there is nothing to do (V-QNX-006). */
+    qmp_req_impl_t *r = claim_parked(s, 1, rcvid, 0);
+    if (r == NULL) {
+        return;
+    }
+    if (s->on_cancel != NULL) {
+        s->on_cancel(s->ctx, (qmp_req_t *)(void *)r);
+    }
+    send_error(s, rcvid, ETIMEDOUT);
+    pool_set_state(s, r, QMP_REQ_FREE);
+}
+
+void qmp_server_on_disconnect(qmp_server_impl_t *s, int32_t scoid, int32_t pid) {
+    /* The client process is gone: its rcvids are dead, so cancel without MsgError. The
+     * transport has already detached the connection (ConnectDetach on QNX). */
+    for (;;) {
+        qmp_req_impl_t *r = claim_parked(s, 0, 0, scoid);
+        if (r == NULL) {
+            break;
+        }
+        if (s->on_cancel != NULL) {
+            s->on_cancel(s->ctx, (qmp_req_t *)(void *)r);
+        }
+        pool_set_state(s, r, QMP_REQ_FREE);
+    }
+    if (s->on_client_gone != NULL) {
+        s->on_client_gone(s->ctx, pid);
+    }
 }
 
 int qmp_req_get_info(const qmp_req_t *req, qmp_req_info_t *info) {

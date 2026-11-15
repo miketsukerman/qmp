@@ -16,6 +16,25 @@
 
 namespace {
 
+// cfg structs grow trailing fields over time; build them by member to keep
+// -Wmissing-field-initializers happy.
+inline qmp_server_cfg_t server_cfg(const qmp_transport_t *tr, int nthreads, void *buf,
+                                   size_t size) {
+    qmp_server_cfg_t cfg{};
+    cfg.transport = tr;
+    cfg.nthreads = nthreads;
+    cfg.workbuf = buf;
+    cfg.workbuf_size = size;
+    return cfg;
+}
+
+inline qmp_client_cfg_t client_cfg(const qmp_transport_t *tr, uint64_t timeout_ns) {
+    qmp_client_cfg_t cfg{};
+    cfg.transport = tr;
+    cfg.default_timeout_ns = timeout_ns;
+    return cfg;
+}
+
 /* Handlers run concurrently on N worker threads: the model guards its own state. The lock
  * is released before the handler returns, i.e. never held across the reply. */
 struct JointModel {
@@ -88,7 +107,7 @@ class E2E : public ::testing::Test {
     void SetUp() override {
         ops_.SetTarget = on_set_target;
         ops_.GetState = on_get_state;
-        qmp_server_cfg_t cfg{qmp_transport_fake(), kThreads, workbuf_, sizeof(workbuf_)};
+        qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), kThreads, workbuf_, sizeof(workbuf_));
         ASSERT_EQ(qmp_server_init(&server_, &cfg), EOK);
         ASSERT_EQ(demo_joint_v1_Joint_register(&server_, 0, &ops_, &model_), EOK);
         runner_ = std::thread([this] { EXPECT_EQ(qmp_server_run(&server_), EOK); });
@@ -101,7 +120,7 @@ class E2E : public ::testing::Test {
     }
 
     void connect(qmp_client_t &c, uint64_t timeout_ns = 0) {
-        qmp_client_cfg_t ccfg{qmp_transport_fake(), timeout_ns};
+        qmp_client_cfg_t ccfg = client_cfg(qmp_transport_fake(), timeout_ns);
         ASSERT_EQ(qmp_client_init(&c, &ccfg), EOK);
         ASSERT_EQ(demo_joint_v1_Joint_connect(&c, 0, &ccfg), EOK);
     }
@@ -233,13 +252,13 @@ TEST_F(E2E, OutOfRangeStringOnTheWireIsERANGE) {
                                             "test.Bounded", methods, 1};
     alignas(8) unsigned char wb[QMP_SERVER_WORKBUF_SIZE(72, 1)];
     qmp_server_t s2;
-    qmp_server_cfg_t cfg{qmp_transport_fake(), 1, wb, sizeof(wb)};
+    qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), 1, wb, sizeof(wb));
     ASSERT_EQ(qmp_server_init(&s2, &cfg), EOK);
     ASSERT_EQ(qmp_server_register(&s2, &desc, 0, &ops, nullptr), EOK);
     std::thread t([&] { qmp_server_run(&s2); });
 
     qmp_client_t c;
-    qmp_client_cfg_t ccfg{qmp_transport_fake(), 0};
+    qmp_client_cfg_t ccfg = client_cfg(qmp_transport_fake(), 0);
     ASSERT_EQ(qmp_client_init(&c, &ccfg), EOK);
     ASSERT_EQ(qmp_client_connect(&c, 0x0202, 0, 1, 0), EOK);
     demo_joint_v1_JointState st{};
@@ -258,7 +277,7 @@ TEST_F(E2E, OutOfRangeStringOnTheWireIsERANGE) {
 
 TEST_F(E2E, MajorMismatchAtHelloIsENOTSUP) {
     qmp_client_t c;
-    qmp_client_cfg_t ccfg{qmp_transport_fake(), 0};
+    qmp_client_cfg_t ccfg = client_cfg(qmp_transport_fake(), 0);
     ASSERT_EQ(qmp_client_init(&c, &ccfg), EOK);
     /* The name encodes the major, so a v2 client never finds a v1 server: ENOENT. */
     EXPECT_EQ(qmp_client_connect(&c, DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, 2, 0), ENOENT);
@@ -281,7 +300,7 @@ TEST_F(E2E, MajorMismatchAtHelloIsENOTSUP) {
 
 TEST_F(E2E, MinorSkewIsAccepted) {
     qmp_client_t c;
-    qmp_client_cfg_t ccfg{qmp_transport_fake(), 0};
+    qmp_client_cfg_t ccfg = client_cfg(qmp_transport_fake(), 0);
     ASSERT_EQ(qmp_client_init(&c, &ccfg), EOK);
     ASSERT_EQ(qmp_client_connect(&c, DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, 1, 7), EOK);
     EXPECT_EQ(qmp_client_server_minor(&c), 0);
@@ -296,7 +315,7 @@ TEST_F(E2E, ConcurrentClientsAcrossWorkers) {
     for (int i = 0; i < kClients; i++) {
         ts.emplace_back([&, i] {
             qmp_client_t c;
-            qmp_client_cfg_t ccfg{qmp_transport_fake(), 0};
+            qmp_client_cfg_t ccfg = client_cfg(qmp_transport_fake(), 0);
             if (qmp_client_init(&c, &ccfg) != EOK ||
                 demo_joint_v1_Joint_connect(&c, 0, &ccfg) != EOK) {
                 failures++;
@@ -331,7 +350,7 @@ TEST_F(E2E, ServerStopUnblocksAndClientSeesESRCH) {
     EXPECT_EQ(demo_joint_v1_Joint_GetState(&c, &st, &status), ESRCH);
     qmp_client_close(&c);
     /* restart so TearDown has something to stop */
-    qmp_server_cfg_t cfg{qmp_transport_fake(), kThreads, workbuf_, sizeof(workbuf_)};
+    qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), kThreads, workbuf_, sizeof(workbuf_));
     ASSERT_EQ(qmp_server_init(&server_, &cfg), EOK);
     ASSERT_EQ(demo_joint_v1_Joint_register(&server_, 0, &ops_, &model_), EOK);
     runner_ = std::thread([this] { qmp_server_run(&server_); });
@@ -339,7 +358,7 @@ TEST_F(E2E, ServerStopUnblocksAndClientSeesESRCH) {
 
 TEST(E2ENoServer, ConnectToMissingServiceIsENOENT) {
     qmp_client_t c;
-    qmp_client_cfg_t ccfg{qmp_transport_fake(), 0};
+    qmp_client_cfg_t ccfg = client_cfg(qmp_transport_fake(), 0);
     ASSERT_EQ(qmp_client_init(&c, &ccfg), EOK);
     EXPECT_EQ(qmp_client_connect(&c, 0x0303, 0, 1, 0), ENOENT);
     int32_t status = 0;
@@ -350,12 +369,12 @@ TEST(E2ENoServer, TimeoutWhenNobodyReceives) {
     /* Listen but never run the loop: the fake has the request PENDING forever. */
     alignas(8) unsigned char wb[QMP_SERVER_WORKBUF_SIZE(72, 1)];
     qmp_server_t s;
-    qmp_server_cfg_t cfg{qmp_transport_fake(), 1, wb, sizeof(wb)};
+    qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), 1, wb, sizeof(wb));
     demo_joint_v1_Joint_ops ops{};
     ASSERT_EQ(qmp_server_init(&s, &cfg), EOK);
     ASSERT_EQ(demo_joint_v1_Joint_register(&s, 0, &ops, nullptr), EOK);
     qmp_client_t c;
-    qmp_client_cfg_t ccfg{qmp_transport_fake(), 20ull * 1000 * 1000};
+    qmp_client_cfg_t ccfg = client_cfg(qmp_transport_fake(), 20ull * 1000 * 1000);
     ASSERT_EQ(qmp_client_init(&c, &ccfg), EOK);
     auto t0 = std::chrono::steady_clock::now();
     EXPECT_EQ(demo_joint_v1_Joint_connect(&c, 0, &ccfg), ETIMEDOUT);

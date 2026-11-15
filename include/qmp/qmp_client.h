@@ -23,6 +23,10 @@ typedef struct qmp_client {
 typedef struct qmp_client_cfg {
     const qmp_transport_t *transport; /* NULL = qmp_transport_default()          */
     uint64_t default_timeout_ns;      /* 0 = block forever                       */
+    /* qmp_client_reconnect() backoff. 0 picks the default in parentheses. */
+    uint32_t reconnect_initial_ms; /* first delay (10)                           */
+    uint32_t reconnect_max_ms;     /* delay ceiling, doubling (1000)             */
+    uint32_t reconnect_attempts;   /* connection attempts (10)                   */
 } qmp_client_cfg_t;
 
 /* Thread: caller's. Never blocks. */
@@ -50,6 +54,15 @@ int qmp_client_oneway(qmp_client_t *c, uint16_t resource_id, const void *req, si
 
 /* Disconnect. Safe to call on a never-connected client. */
 int qmp_client_close(qmp_client_t *c);
+
+/* Reconnect after the server died (a call returned ESRCH or EBADF and the client marked
+ * itself disconnected). Retries connect + HELLO with exponential backoff per the cfg.
+ * Never replays a failed call: the application decides what is safe to repeat (DESIGN
+ * §3.7). Compare qmp_client_server_generation() before and after to learn whether the
+ * server restarted (it did when the value changed). Blocking: yes, up to the full backoff
+ * schedule. Returns EOK, EISCONN if still connected, ENOTCONN if never connected, or the
+ * last connect error (ENOENT, ETIMEDOUT, ...). */
+int qmp_client_reconnect(qmp_client_t *c);
 
 int qmp_client_is_connected(const qmp_client_t *c);
 uint32_t qmp_client_server_generation(const qmp_client_t *c);

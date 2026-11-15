@@ -30,6 +30,11 @@ typedef struct qmp_client_impl {
     uint8_t connected;
     uint32_t server_generation;
     uint32_t server_max_msg_size;
+    uint8_t have_params; /* connect() ran once: reconnect() may reuse the identity */
+    uint8_t _pad0[3];
+    uint32_t reconnect_initial_ms;
+    uint32_t reconnect_max_ms;
+    uint32_t reconnect_attempts;
 } qmp_client_impl_t;
 QMP_STATIC_ASSERT(sizeof(qmp_client_impl_t) <= sizeof(qmp_client_t), "qmp_client_t too small");
 QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_client_impl_t) <= QMP_ALIGNOF(qmp_client_t),

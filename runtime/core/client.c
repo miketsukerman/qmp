@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Client: connect + HELLO handshake, synchronous calls. No hidden threads, no heap. */
 #include <string.h>
+#include <time.h>
 
 #include "internal.h"
 
@@ -20,6 +21,12 @@ int qmp_client_init(qmp_client_t *c, const qmp_client_cfg_t *cfg) {
     memset(ci, 0, sizeof(*ci));
     ci->tr = (cfg != NULL && cfg->transport != NULL) ? cfg->transport : qmp_transport_default();
     ci->default_timeout_ns = cfg != NULL ? cfg->default_timeout_ns : 0;
+    ci->reconnect_initial_ms =
+        (cfg != NULL && cfg->reconnect_initial_ms != 0) ? cfg->reconnect_initial_ms : 10U;
+    ci->reconnect_max_ms =
+        (cfg != NULL && cfg->reconnect_max_ms != 0) ? cfg->reconnect_max_ms : 1000U;
+    ci->reconnect_attempts =
+        (cfg != NULL && cfg->reconnect_attempts != 0) ? cfg->reconnect_attempts : 10U;
     return ci->tr != NULL ? EOK : EINVAL;
 }
 
@@ -43,6 +50,42 @@ static int do_call(qmp_client_impl_t *ci, qmp_hdr_t *req_hdr, const void *req, s
     return qmp_hdr_validate_reply(rep_hdr, req_hdr, reply_len, rep_cap);
 }
 
+/* Resolve, connect and HELLO using the identity stored in the impl. */
+static int connect_once(qmp_client_impl_t *ci) {
+    char path[QMP_NAME_MAX];
+    int rc = qmp_service_path(path, sizeof(path), ci->service_id, ci->instance_id, ci->ver_major);
+    if (rc != EOK) {
+        return rc;
+    }
+    rc = ci->tr->connect(&ci->conn, path);
+    if (rc != EOK) {
+        return rc;
+    }
+    qmp_hdr_t req_hdr;
+    qmp_hdr_t rep_hdr;
+    qmp_hello_t hello = {ci->service_id, ci->instance_id, ci->ver_major, ci->ver_minor, {0, 0}};
+    qmp_hello_reply_t hr;
+    qmp_hdr_init(&req_hdr, ci->service_id, ci->instance_id, QMP_OP_HELLO, ci->ver_major,
+                 ci->ver_minor, QMP_F_CONTROL, (uint32_t)sizeof(hello));
+    rc = do_call(ci, &req_hdr, &hello, sizeof(hello), &rep_hdr, &hr, sizeof(hr),
+                 ci->default_timeout_ns);
+    if (rc == EOK && (rep_hdr.payload_len != sizeof(hr) || rep_hdr.status != 0)) {
+        rc = EPROTO;
+    }
+    if (rc == EOK) {
+        rc = qmp_version_compatible(hr.ver_major, hr.ver_minor, ci->ver_major, ci->ver_minor);
+    }
+    if (rc != EOK) {
+        (void)ci->tr->disconnect(&ci->conn);
+        return rc;
+    }
+    ci->server_minor = hr.ver_minor;
+    ci->server_generation = hr.server_generation;
+    ci->server_max_msg_size = hr.max_msg_size;
+    ci->connected = 1;
+    return EOK;
+}
+
 int qmp_client_connect(qmp_client_t *c, uint16_t service_id, uint16_t instance_id,
                        uint8_t ver_major, uint8_t ver_minor) {
     if (c == NULL) {
@@ -55,43 +98,54 @@ int qmp_client_connect(qmp_client_t *c, uint16_t service_id, uint16_t instance_i
     if (ci->connected) {
         return EISCONN;
     }
-    char path[QMP_NAME_MAX];
-    int rc = qmp_service_path(path, sizeof(path), service_id, instance_id, ver_major);
-    if (rc != EOK) {
-        return rc;
-    }
-    rc = ci->tr->connect(&ci->conn, path);
-    if (rc != EOK) {
-        return rc;
-    }
     ci->service_id = service_id;
     ci->instance_id = instance_id;
     ci->ver_major = ver_major;
     ci->ver_minor = ver_minor;
-
-    qmp_hdr_t req_hdr;
-    qmp_hdr_t rep_hdr;
-    qmp_hello_t hello = {service_id, instance_id, ver_major, ver_minor, {0, 0}};
-    qmp_hello_reply_t hr;
-    qmp_hdr_init(&req_hdr, service_id, instance_id, QMP_OP_HELLO, ver_major, ver_minor,
-                 QMP_F_CONTROL, (uint32_t)sizeof(hello));
-    rc = do_call(ci, &req_hdr, &hello, sizeof(hello), &rep_hdr, &hr, sizeof(hr),
-                 ci->default_timeout_ns);
-    if (rc == EOK && (rep_hdr.payload_len != sizeof(hr) || rep_hdr.status != 0)) {
-        rc = EPROTO;
-    }
+    int rc = connect_once(ci);
     if (rc == EOK) {
-        rc = qmp_version_compatible(hr.ver_major, hr.ver_minor, ver_major, ver_minor);
+        ci->have_params = 1;
     }
-    if (rc != EOK) {
+    return rc;
+}
+
+/* A dead server makes the connection useless: drop it so calls fail fast with ENOTCONN
+ * and qmp_client_reconnect() can run. Never retries the call itself (DESIGN §3.7). */
+static int mark_dead_on(int rc, qmp_client_impl_t *ci) {
+    if (rc == ESRCH || rc == EBADF) {
         (void)ci->tr->disconnect(&ci->conn);
-        return rc;
+        ci->connected = 0;
     }
-    ci->server_minor = hr.ver_minor;
-    ci->server_generation = hr.server_generation;
-    ci->server_max_msg_size = hr.max_msg_size;
-    ci->connected = 1;
-    return EOK;
+    return rc;
+}
+
+int qmp_client_reconnect(qmp_client_t *c) {
+    if (c == NULL) {
+        return EINVAL;
+    }
+    qmp_client_impl_t *ci = impl(c);
+    if (ci->tr == NULL || !ci->have_params) {
+        return ENOTCONN;
+    }
+    if (ci->connected) {
+        return EISCONN;
+    }
+    uint32_t delay_ms = ci->reconnect_initial_ms;
+    int rc = ENOTCONN;
+    for (uint32_t attempt = 0; attempt < ci->reconnect_attempts; attempt++) {
+        if (attempt != 0) {
+            struct timespec ts = {(time_t)(delay_ms / 1000U),
+                                  (long)(delay_ms % 1000U) * 1000000L};
+            (void)nanosleep(&ts, NULL);
+            delay_ms = delay_ms < ci->reconnect_max_ms / 2U ? delay_ms * 2U
+                                                            : ci->reconnect_max_ms;
+        }
+        rc = connect_once(ci);
+        if (rc == EOK || rc == ENOTSUP) {
+            break; /* connected, or a major-version mismatch retries can't fix */
+        }
+    }
+    return rc;
 }
 
 int qmp_client_call(qmp_client_t *c, uint16_t resource_id, const void *req, size_t req_len,
@@ -120,7 +174,7 @@ int qmp_client_call(qmp_client_t *c, uint16_t resource_id, const void *req, size
     req_hdr.up_priority = up_priority;
     int rc = do_call(ci, &req_hdr, req, req_len, &rep_hdr, rep, rep_cap, timeout_ns);
     if (rc != EOK) {
-        return rc;
+        return mark_dead_on(rc, ci);
     }
     *status = rep_hdr.status;
     if (rep_hdr.status == 0 && rep_hdr.payload_len != rep_cap) {
@@ -154,7 +208,7 @@ int qmp_client_oneway(qmp_client_t *c, uint16_t resource_id, const void *req, si
     req_hdr.up_priority = up_priority;
     int rc = do_call(ci, &req_hdr, req, req_len, &rep_hdr, NULL, 0, timeout_ns);
     if (rc != EOK) {
-        return rc;
+        return mark_dead_on(rc, ci);
     }
     /* The receipt reply is header-only with status 0; anything else is a protocol bug. */
     return (rep_hdr.status == 0 && rep_hdr.payload_len == 0) ? EOK : EPROTO;

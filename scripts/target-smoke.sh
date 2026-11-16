@@ -190,11 +190,13 @@ result joint-kernel-states "$rc"
 note "joint 3: client death — kill -9 the client mid-call; server logs it and keeps serving"
 SPID=$(start_jsrv jsrv3.log)
 track "$SPID"
-CPID=$(t "'$JCLI' --timeout 0 slow 30000 sleep > '$QMP_TARGET_DIR/jcli3.log' 2>&1 & echo \$!" | tr -d '\r')
+CPID=$(t "'$JCLI' --timeout 0 slow 5000 sleep > '$QMP_TARGET_DIR/jcli3.log' 2>&1 & echo \$!" | tr -d '\r')
 track "$CPID"
 sleep 2
 t "kill -9 $CPID 2>/dev/null || true"
 rc=0
+# A killed REPLY-blocked client is not fully disconnected until its handler replies;
+# keep the burn short enough that the disconnect pulse arrives within this wait.
 wait_for 'client disconnected' jsrv3.log 10 || rc=$?
 if [ "$rc" -eq 0 ]; then
     t "'$JCLI' once" || rc=$?

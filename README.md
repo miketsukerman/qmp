@@ -15,6 +15,51 @@ An individual entry for the QNX Global Developer Hackathon 2026.
 * Open verification items against QNX SDP 8.0 / uProtocol: [docs/VERIFY.md](docs/VERIFY.md)
 * Tutorial: [docs/codelab/](docs/codelab/) · Spikes: [docs/spikes/](docs/spikes/)
 
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph HOST["Host: code generation"]
+    direction LR
+    proto["joint.proto<br/>uProtocol options<br/>qmp/options.proto"]
+    gen["protoc + protoc-gen-qmp<br/>(Python, Jinja2)"]
+    art["joint.qmp.h / joint.qmp.c (C11)<br/>joint.qmp.hpp (C++17, optional)<br/>joint.reflect.json"]
+    proto --> gen --> art
+  end
+
+  subgraph TARGET["Target: QNX SDP 8.0 (aarch64le / x86_64)"]
+    subgraph CLIENT["Client process (C or C++)"]
+      c_user["Application code<br/>calls, qmp_client_poll()"]
+      c_gen["Generated proxy<br/>typed stubs, topic callbacks"]
+      c_core["libqmp core<br/>header codec, HELLO, reconnect"]
+      c_tx["transport/qnx<br/>MsgSendv, TimerTimeout, MsgRegisterEvent"]
+      c_user --- c_gen --- c_core --- c_tx
+    end
+
+    subgraph SERVER["Server process (joint_service)"]
+      s_user["Handlers, publish loop"]
+      s_gen["Generated skeleton<br/>ops table, bounds validators"]
+      s_core["libqmp core<br/>dispatch, subscriptions, deferred pool"]
+      s_tx["transport/qnx<br/>N workers RECEIVE-blocked on one channel"]
+      s_user --- s_gen --- s_core --- s_tx
+    end
+
+    kernel["QNX microkernel (procnto)<br/>channels, connections, pulses,<br/>priority inheritance, registered events"]
+
+    c_tx <-->|"MsgSendv: 24-byte header IOV + POD payload IOV"| kernel
+    s_tx <-->|"MsgReceivev / MsgReplyv / MsgError"| kernel
+    s_tx -.->|"MsgDeliverEvent: topic pulse, client then pulls"| c_tx
+  end
+
+  art -.->|compiled into| c_gen
+  art -.->|compiled into| s_gen
+```
+
+Each layer only calls the one below it. Handlers run on a libqmp worker at the
+caller's priority (inherited through `MsgSend`); the server never sends to a
+client, so topics use notify-then-pull over registered events. The same core
+also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
+only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 ## Status (W1)
 
 | Area | State |

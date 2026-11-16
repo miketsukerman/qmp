@@ -16,5 +16,11 @@ add_executable(qmp_core_tests
 target_include_directories(qmp_core_tests PRIVATE "${PROJECT_SOURCE_DIR}/runtime")
 target_link_libraries(qmp_core_tests PRIVATE qmp::qmp qmp_test_joint GTest::gtest_main)
 qmp_set_warnings(qmp_core_tests)
-include(GoogleTest)
-gtest_discover_tests(qmp_core_tests DISCOVERY_TIMEOUT 30)
+if(CMAKE_CROSSCOMPILING AND NOT CMAKE_CROSSCOMPILING_EMULATOR)
+  # Discovery runs the binary post-build, which cannot work on the build host for a target
+  # executable. Register it as one test; run it on the board with scripts/target-run.sh.
+  add_test(NAME qmp_core_tests COMMAND qmp_core_tests)
+else()
+  include(GoogleTest)
+  gtest_discover_tests(qmp_core_tests DISCOVERY_TIMEOUT 30)
+endif()

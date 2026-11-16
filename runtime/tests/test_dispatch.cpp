@@ -22,13 +22,6 @@ inline qmp_server_cfg_t server_cfg(const qmp_transport_t *tr, int nthreads, void
     return cfg;
 }
 
-inline qmp_client_cfg_t client_cfg(const qmp_transport_t *tr, uint64_t timeout_ns) {
-    qmp_client_cfg_t cfg{};
-    cfg.transport = tr;
-    cfg.default_timeout_ns = timeout_ns;
-    return cfg;
-}
-
 qmp_hdr_t hdr(uint16_t resource, uint32_t payload_len,
               uint16_t svc = DEMO_JOINT_V1_JOINT_SERVICE_ID, uint16_t inst = 0, uint8_t major = 1) {
     qmp_hdr_t h;

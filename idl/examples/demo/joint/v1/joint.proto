@@ -27,6 +27,17 @@ message JointState {
   string mode = 5 [(qmp.max_len) = 16];
 }
 
+// Request for Joint.Burn: keep a worker busy for duration_ms, sleeping or spinning.
+message BurnRequest {
+  uint32 duration_ms = 1;
+  bool spin = 2;  // true = burn CPU (makes priority inheritance visible), false = sleep
+}
+
+// Reply for Joint.Burn.
+message BurnReply {
+  uint64 iterations = 1;  // spin-loop iterations executed (0 for the sleeping variant)
+}
+
 // Zero-field message: transmitted as payload_len = 0, no C struct is generated.
 message Empty {}
 
@@ -54,5 +65,8 @@ service Joint {
   }
   rpc GetState(Empty) returns (JointState) {
     option (uprotocol.method_id) = 0x0003;
+  }
+  rpc Burn(BurnRequest) returns (BurnReply) {
+    option (uprotocol.method_id) = 0x0004;
   }
 }

@@ -26,10 +26,12 @@ extern "C" {
 #define DEMO_JOINT_V1_JOINT_M_SETTARGET 0x0001U
 #define DEMO_JOINT_V1_JOINT_M_STOP 0x0002U
 #define DEMO_JOINT_V1_JOINT_M_GETSTATE 0x0003U
+#define DEMO_JOINT_V1_JOINT_M_BURN 0x0004U
 #define DEMO_JOINT_V1_JOINT_T_STATECHANGED 0x8001U
 #define DEMO_JOINT_V1_JOINT_UURI_SETTARGET "/101/1/1"
 #define DEMO_JOINT_V1_JOINT_UURI_STOP "/101/1/2"
 #define DEMO_JOINT_V1_JOINT_UURI_GETSTATE "/101/1/3"
+#define DEMO_JOINT_V1_JOINT_UURI_BURN "/101/1/4"
 #define DEMO_JOINT_V1_JOINT_UURI_STATECHANGED "/101/1/8001"
 #define DEMO_JOINT_V1_JOINT_MAX_PAYLOAD  48U
 /* header + largest payload: size the server work buffer with this */
@@ -82,6 +84,23 @@ QMP_STATIC_ASSERT(offsetof(demo_joint_v1_JointState, mode) == 24, "layout");
 /* Bounds check of an untrusted demo_joint_v1_JointState: EOK or ERANGE. */
 int demo_joint_v1_JointState_validate(const void *payload);
 
+/* message demo.joint.v1.BurnRequest */
+typedef struct demo_joint_v1_BurnRequest {
+    uint32_t duration_ms;                    /* 0   field 1 */
+    uint8_t spin;                            /* 4   field 2 */
+    uint8_t _pad0[3];                        /* 5    */
+} demo_joint_v1_BurnRequest; /* 8 bytes, align 4 */
+QMP_STATIC_ASSERT(sizeof(demo_joint_v1_BurnRequest) == 8, "layout");
+QMP_STATIC_ASSERT(offsetof(demo_joint_v1_BurnRequest, duration_ms) == 0, "layout");
+QMP_STATIC_ASSERT(offsetof(demo_joint_v1_BurnRequest, spin) == 4, "layout");
+
+/* message demo.joint.v1.BurnReply */
+typedef struct demo_joint_v1_BurnReply {
+    uint64_t iterations;                     /* 0   field 1 */
+} demo_joint_v1_BurnReply; /* 8 bytes, align 8 */
+QMP_STATIC_ASSERT(sizeof(demo_joint_v1_BurnReply) == 8, "layout");
+QMP_STATIC_ASSERT(offsetof(demo_joint_v1_BurnReply, iterations) == 0, "layout");
+
 /* ---- client ------------------------------------------------------------ */
 /* Return: EOK or errno. *status receives the UCode set by the server (0 = OK).
  * Blocking: yes (MsgSendv). Thread: caller's. Priority: caller's, inherited by the server.
@@ -103,6 +122,16 @@ int demo_joint_v1_Joint_GetState(qmp_client_t *c, demo_joint_v1_JointState *rep,
 /* opts: timeout_ns, up_priority; NULL = client defaults */
 int demo_joint_v1_Joint_GetState_ex(qmp_client_t *c, demo_joint_v1_JointState *rep, int32_t *status,
     const qmp_call_opts_t *opts);
+int demo_joint_v1_Joint_Burn(qmp_client_t *c,
+    const demo_joint_v1_BurnRequest *req,
+    demo_joint_v1_BurnReply *rep,
+    int32_t *status);
+/* opts: timeout_ns, up_priority; NULL = client defaults */
+int demo_joint_v1_Joint_Burn_ex(qmp_client_t *c,
+    const demo_joint_v1_BurnRequest *req,
+    demo_joint_v1_BurnReply *rep,
+    int32_t *status,
+    const qmp_call_opts_t *opts);
 /* Stop: one-way method (qmp.oneway); client stub and server dispatch arrive in W3. */
 /* topic StateChanged (0x8001, LATEST, sample demo_joint_v1_JointState):
  * subscribe/publish arrive in W3. */
@@ -121,6 +150,11 @@ typedef struct demo_joint_v1_Joint_ops {
     int (*GetState)(void *ctx,
         qmp_req_t *req,
         demo_joint_v1_JointState *out,
+        int32_t *status);
+    int (*Burn)(void *ctx,
+        qmp_req_t *req,
+        const demo_joint_v1_BurnRequest *in,
+        demo_joint_v1_BurnReply *out,
         int32_t *status);
     void (*on_cancel)(void *ctx, qmp_req_t *req);   /* deferred req unblocked (W2), optional */
     void (*on_client_gone)(void *ctx, int32_t pid); /* client process gone (W2), optional    */

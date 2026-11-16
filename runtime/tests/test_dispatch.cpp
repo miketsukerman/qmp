@@ -30,13 +30,16 @@ qmp_hdr_t hdr(uint16_t resource, uint32_t payload_len,
 }
 
 TEST(Dispatch, GeneratedTableIsSortedAndSized) {
-    ASSERT_EQ(demo_joint_v1_Joint_desc.nmethods, 3u);
+    ASSERT_EQ(demo_joint_v1_Joint_desc.nmethods, 4u);
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[0].id, DEMO_JOINT_V1_JOINT_M_SETTARGET);
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[0].in_size, sizeof(demo_joint_v1_SetTargetRequest));
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[0].out_size, sizeof(demo_joint_v1_SetTargetReply));
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[1].flags, QMP_MF_ONEWAY);
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[2].in_size, 0u);
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[2].out_size, sizeof(demo_joint_v1_JointState));
+    EXPECT_EQ(demo_joint_v1_Joint_desc.methods[3].id, DEMO_JOINT_V1_JOINT_M_BURN);
+    EXPECT_EQ(demo_joint_v1_Joint_desc.methods[3].in_size, sizeof(demo_joint_v1_BurnRequest));
+    EXPECT_EQ(demo_joint_v1_Joint_desc.methods[3].out_size, sizeof(demo_joint_v1_BurnReply));
     EXPECT_EQ(demo_joint_v1_Joint_desc.max_msg_size, QMP_HDR_SIZE + 48u);
 }
 

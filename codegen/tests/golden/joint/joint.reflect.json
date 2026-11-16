@@ -54,6 +54,18 @@
           "out_size": 48,
           "allow_types": [],
           "permission_level": null
+        },
+        {
+          "name": "Burn",
+          "id": 4,
+          "uuri": "/101/1/4",
+          "oneway": false,
+          "input": "demo.joint.v1.BurnRequest",
+          "output": "demo.joint.v1.BurnReply",
+          "in_size": 8,
+          "out_size": 8,
+          "allow_types": [],
+          "permission_level": null
         }
       ],
       "topics": [
@@ -71,6 +83,49 @@
     }
   ],
   "messages": {
+    "demo.joint.v1.BurnReply": {
+      "name": "demo.joint.v1.BurnReply",
+      "c_type": "demo_joint_v1_BurnReply",
+      "size": 8,
+      "align": 8,
+      "fields": [
+        {
+          "name": "iterations",
+          "number": 1,
+          "type": "uint64",
+          "repeated": false,
+          "c_type": "uint64_t",
+          "offset": 0,
+          "size": 8
+        }
+      ]
+    },
+    "demo.joint.v1.BurnRequest": {
+      "name": "demo.joint.v1.BurnRequest",
+      "c_type": "demo_joint_v1_BurnRequest",
+      "size": 8,
+      "align": 4,
+      "fields": [
+        {
+          "name": "duration_ms",
+          "number": 1,
+          "type": "uint32",
+          "repeated": false,
+          "c_type": "uint32_t",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "spin",
+          "number": 2,
+          "type": "bool",
+          "repeated": false,
+          "c_type": "uint8_t",
+          "offset": 4,
+          "size": 1
+        }
+      ]
+    },
     "demo.joint.v1.Empty": {
       "name": "demo.joint.v1.Empty",
       "c_type": null,

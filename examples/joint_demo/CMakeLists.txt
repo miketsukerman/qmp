@@ -13,9 +13,10 @@ add_executable(qmp_joint_client joint_client.c "${_joint_demo_src}")
 target_link_libraries(qmp_joint_client PRIVATE qmp_gen_joint_demo)
 qmp_set_warnings(qmp_joint_client)
 
+target_compile_definitions(qmp_joint_server PRIVATE _POSIX_C_SOURCE=200809L)
+target_compile_definitions(qmp_joint_client PRIVATE _POSIX_C_SOURCE=200809L)
+
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "QNX")
-  target_compile_definitions(qmp_joint_server PRIVATE _POSIX_C_SOURCE=200809L)
-  target_compile_definitions(qmp_joint_client PRIVATE _POSIX_C_SOURCE=200809L)
   if(QMP_BUILD_TESTS)
     add_test(NAME joint_server_selftest COMMAND qmp_joint_server --selftest)
   endif()

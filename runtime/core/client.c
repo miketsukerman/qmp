@@ -134,11 +134,9 @@ int qmp_client_reconnect(qmp_client_t *c) {
     int rc = ENOTCONN;
     for (uint32_t attempt = 0; attempt < ci->reconnect_attempts; attempt++) {
         if (attempt != 0) {
-            struct timespec ts = {(time_t)(delay_ms / 1000U),
-                                  (long)(delay_ms % 1000U) * 1000000L};
+            struct timespec ts = {(time_t)(delay_ms / 1000U), (long)(delay_ms % 1000U) * 1000000L};
             (void)nanosleep(&ts, NULL);
-            delay_ms = delay_ms < ci->reconnect_max_ms / 2U ? delay_ms * 2U
-                                                            : ci->reconnect_max_ms;
+            delay_ms = delay_ms < ci->reconnect_max_ms / 2U ? delay_ms * 2U : ci->reconnect_max_ms;
         }
         rc = connect_once(ci);
         if (rc == EOK || rc == ENOTSUP) {

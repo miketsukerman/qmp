@@ -107,7 +107,8 @@ class E2E : public ::testing::Test {
     void SetUp() override {
         ops_.SetTarget = on_set_target;
         ops_.GetState = on_get_state;
-        qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), kThreads, workbuf_, sizeof(workbuf_));
+        qmp_server_cfg_t cfg =
+            server_cfg(qmp_transport_fake(), kThreads, workbuf_, sizeof(workbuf_));
         ASSERT_EQ(qmp_server_init(&server_, &cfg), EOK);
         ASSERT_EQ(demo_joint_v1_Joint_register(&server_, 0, &ops_, &model_), EOK);
         runner_ = std::thread([this] { EXPECT_EQ(qmp_server_run(&server_), EOK); });

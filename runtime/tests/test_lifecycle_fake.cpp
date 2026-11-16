@@ -22,9 +22,9 @@
 namespace {
 
 constexpr uint16_t kSvc = 0x0404;
-constexpr uint16_t kMEcho = 0x0001;  // two-way, deferrable
-constexpr uint16_t kMFire = 0x0002;  // one-way
-constexpr uint16_t kMDeny = 0x0003;  // two-way, denied by the ACL in some tests
+constexpr uint16_t kMEcho = 0x0001; // two-way, deferrable
+constexpr uint16_t kMFire = 0x0002; // one-way
+constexpr uint16_t kMDeny = 0x0003; // two-way, denied by the ACL in some tests
 
 struct EchoIn {
     int32_t value;
@@ -38,8 +38,8 @@ struct EchoOut {
 struct Model {
     std::mutex mu;
     std::condition_variable cv;
-    qmp_req_t *parked = nullptr;      // set when Echo defers
-    bool defer_next = false;          // Echo returns QMP_DEFERRED
+    qmp_req_t *parked = nullptr; // set when Echo defers
+    bool defer_next = false;     // Echo returns QMP_DEFERRED
     std::atomic<int> fire_calls{0};
     std::atomic<int> cancels{0};
     std::atomic<int> clients_gone{0};
@@ -111,8 +111,7 @@ const qmp_method_desc_t kMethods[] = {
     {kMDeny, 0, sizeof(EchoIn), sizeof(EchoOut), 0, nullptr, echo_handler, "Deny"},
 };
 
-const qmp_service_desc_t kDesc = {kSvc, 1, 0, QMP_HDR_SIZE + 64, "test.Lifecycle",
-                                  kMethods, 3};
+const qmp_service_desc_t kDesc = {kSvc, 1, 0, QMP_HDR_SIZE + 64, "test.Lifecycle", kMethods, 3};
 
 class Lifecycle : public ::testing::Test {
   protected:
@@ -352,8 +351,7 @@ TEST_F(Lifecycle, ReconnectAfterRestartSeesANewGeneration) {
     EchoIn in{1, {}};
     EchoOut out{};
     int32_t st = 0;
-    EXPECT_EQ(qmp_client_call(&c, kMEcho, &in, sizeof(in), &out, sizeof(out), &st, nullptr),
-              ESRCH);
+    EXPECT_EQ(qmp_client_call(&c, kMEcho, &in, sizeof(in), &out, sizeof(out), &st, nullptr), ESRCH);
     EXPECT_FALSE(qmp_client_is_connected(&c));
     EXPECT_EQ(qmp_client_call(&c, kMEcho, &in, sizeof(in), &out, sizeof(out), &st, nullptr),
               ENOTCONN);

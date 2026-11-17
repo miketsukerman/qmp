@@ -179,8 +179,10 @@ when a timeout is armed. No heap, no copies beyond the kernel's.
  ◄── client stays REPLY-blocked ──── │ ~~► _PULSE_CODE_UNBLOCK{rcvid} to T3
                                      │ T3: find deferred req by rcvid
                                      │     ops->on_cancel(ctx, req)     (user drops its pointer)
-                                     │     MsgError(rcvid, ETIMEDOUT)   (releases client)
- MsgSendv returns -1, errno ETIMEDOUT│ VERIFY V-QNX-006: errno seen by client
+                                     │     MsgError(rcvid, ECANCELED)   (releases client)
+ MsgSendv returns -1, errno ECANCELED│ VERIFY V-QNX-006: errno seen by client
+ client: own deadline expired        │
+ → maps ECANCELED to ETIMEDOUT       │
  Joint_GetState returns ETIMEDOUT    │
                                      │                                   Joint_GetState_reply(req,...)
                                      │                                   → EINVAL (slot already released);
@@ -191,6 +193,39 @@ Rules: the `qmp_req_t*` stays valid until replied, cancelled, or client disconne
 pool is caller-provided (`qmp_req_t slots[8]`); when full the server replies `MsgError(EAGAIN)`
 (UCode `RESOURCE_EXHAUSTED` reported by client). Slot reuse is guarded by a generation counter in
 `qmp_req_t` so a stale pointer from a cancelled request cannot reply to a newer request.
+
+**Timeout and cancellation contract** (applies to parked *and* running requests):
+
+* The server cannot tell a client timeout from a signal: both arrive as the same
+  `_PULSE_CODE_UNBLOCK`. It therefore always replies the neutral `MsgError(rcvid, ECANCELED)`.
+  The client maps `ECANCELED` to `ETIMEDOUT` only when its **own** `CLOCK_MONOTONIC` deadline
+  has passed; a signal-caused unblock surfaces as `ECANCELED`.
+* Before cancelling anything, the server confirms with `MsgInfo()` that
+  `_NTO_MI_UNBLOCK_REQ` is still set (V-QNX-037), so a stale pulse (the rcvid was already
+  replied and possibly reused) is dropped instead of cancelling a newer request.
+* A **running** synchronous handler is never interrupted. Each worker owns a preallocated
+  in-flight slot `{rcvid, scoid, state}`; the unblock path marks it `CANCELED` and releases
+  the client immediately, while the handler keeps running and can only observe this by
+  polling `qmp_req_canceled(req)` at a rate of its choosing. When the handler returns, the
+  worker rechecks the slot under the pool mutex: if cancelled, the result is **discarded**
+  and no second reply is sent (single-reply invariant: whoever first claims the slot —
+  canceller or owning worker — is the only one that replies to that rcvid).
+* Consequence for callers: **a timed-out call may still have executed, partially or fully.**
+  `ETIMEDOUT`/`ECANCELED` mean "no result was delivered", not "nothing happened". Methods
+  with side effects must be idempotent or the application must reconcile after a timeout.
+* The worker's priority is *not* dropped when its request is cancelled. The kernel boost
+  lasts only until the cancel reply/`MsgError`; after that the thread finishes the handler at
+  the priority it already has and resets at the next `MsgReceive`. An explicit
+  `pthread_setschedparam` from the cancelling thread would race with the handler and is not
+  worth the complexity for a window bounded by the handler's own `qmp_req_canceled` poll
+  rate.
+* Pulses are served even when every worker is busy: a dedicated pulse thread blocks in
+  `MsgReceivePulse()` on the same channel and only consumes pulses, never messages
+  (V-QNX-038). Workers that are RECEIVE-blocked may also pick up pulses; both paths call the
+  same idempotent handlers.
+* A client disconnect (`_PULSE_CODE_DISCONNECT`) cancels that process's parked requests
+  (`on_cancel`, no reply — the rcvid is dead) and marks its running in-flight requests
+  `CANCELED` so their late results are discarded.
 
 ### 3.4 One-way call
 
@@ -469,10 +504,18 @@ move-only RAII owner of a `qmp_sub_t` that unsubscribes in its destructor.
 
 * `qmp_server_run(s)` spawns `N-1` worker threads and runs the N-th on the caller; all are
   `MsgReceivev`-blocked on the single channel (channel flags: `_NTO_CHF_DISCONNECT |
-  _NTO_CHF_UNBLOCK | _NTO_CHF_COID_DISCONNECT`; never `_NTO_CHF_FIXED_PRIORITY`).
+  _NTO_CHF_UNBLOCK | _NTO_CHF_COID_DISCONNECT`; never `_NTO_CHF_FIXED_PRIORITY` on service
+  channels — the explicit `QMP_LISTEN_FIXED_PRIORITY` listen flag exists solely as the
+  negative control for the priority-inheritance experiment, V-QNX-041). The channel is always
+  created by qmp itself (`ChannelCreate` → `dispatch_create_channel` → `name_attach`,
+  V-QNX-039/040) so the flags are identical in both modes.
+* In addition, `qmp_server_run` starts one dedicated pulse thread blocked in
+  `MsgReceivePulse()` whenever the transport provides it, so `UNBLOCK`/`DISCONNECT` pulses
+  are served even when every worker is busy inside a handler (V-QNX-038).
 * Choosing N: `N = 1 + max concurrent deferred handlers that block + 1 spare for pulses`,
   capped at the number of CPUs ×2. Default 4. Rationale: a worker blocked inside a handler
-  cannot receive; pulses (`UNBLOCK`, `DISCONNECT`) must always find a free receiver.
+  cannot receive; the pulse thread guarantees cancellation, but messages still need a free
+  worker.
 * Base priority: all workers start at `cfg.base_prio` (default: priority of the caller of
   `qmp_server_run`). While a worker holds a received message its priority is the client's.
 * Never hold a mutex across `MsgReplyv`, `MsgDeliverEvent`, `MsgSendv`. The subscription
@@ -549,8 +592,8 @@ translating a `UStatus` back:
 | errno (C return) | UCode (`hdr.status` / UStatus.code) | Situation |
 |------------------|--------------------------------------|-----------|
 | `EOK` 0 | `OK` 0 | success |
-| `ETIMEDOUT` | `DEADLINE_EXCEEDED` 4 | `TimerTimeout` fired; server got `_PULSE_CODE_UNBLOCK` |
-| `EINTR`, `ECANCELED` | `CANCELLED` 1 | signal / explicit cancel / `on_cancel` path |
+| `ETIMEDOUT` | `DEADLINE_EXCEEDED` 4 | client-side mapping of the server's neutral `ECANCELED` when the client's own deadline passed (§3.3) |
+| `EINTR`, `ECANCELED` | `CANCELLED` 1 | signal / explicit cancel; server always replies `ECANCELED` on unblock |
 | `EINVAL`, `EMSGSIZE`, `E2BIG` | `INVALID_ARGUMENT` 3 | header/payload validation failed |
 | `ERANGE` | `OUT_OF_RANGE` 11 | `len > max_len`, `count > max_count` |
 | `ENOENT` | `NOT_FOUND` 5 | `name_open` failed; unknown method/topic |

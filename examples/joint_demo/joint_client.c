@@ -14,6 +14,16 @@
  *   reconnect [MAX_S]      keep calling GetState; report every failure with its errno,
  *                          reconnect with backoff, exit 0 once the server generation
  *                          changed and a call succeeded (give up after MAX_S s, def. 60)
+ *   subscribe [state|log] [N] [MAX_S] [SLOW_MS]
+ *                          subscribe to a topic — state = StateChanged (LATEST), log =
+ *                          StateLog (QUEUE depth 8) — and print one line per update
+ *                          (receive timestamp, topic seq, dropped count, payload); PASS
+ *                          after N updates (default 10) within MAX_S s (default 30).
+ *                          SLOW_MS > 0 sleeps between polls to emulate a slow subscriber:
+ *                          LATEST then skips to the newest value, QUEUE replays the
+ *                          backlog; both report the dropped count instead of hiding loss.
+ *                          If the server dies mid-stream, reconnect; the subscription is
+ *                          re-established automatically on the new session (ADR-003).
  *
  *   --timeout MS           per-call timeout (default: 5000; 0 = block forever)
  *   --expect ERRNO         the mode is expected to fail with this errno name (ETIMEDOUT,
@@ -273,10 +283,88 @@ static int mode_reconnect(qmp_client_t *c, long max_s) {
     return ETIMEDOUT;
 }
 
+/* ---- subscribe: topic updates line by line (ADR-003 notify-then-pull) ----------------- */
+
+typedef struct sub_stats {
+    long updates;
+    uint64_t dropped_total;
+} sub_stats_t;
+
+/* Runs on the qmp_client_poll() thread (= main). One stdout line per update. */
+static void on_state_update(void *ctx, const demo_joint_v1_JointState *st, uint64_t seq,
+                            uint64_t dropped) {
+    sub_stats_t *ss = (sub_stats_t *)ctx;
+    uint64_t t = now_ns();
+    ss->updates++;
+    ss->dropped_total += dropped;
+    printf("update: recv=%" PRIu64 ".%06" PRIu64 " seq=%" PRIu64 " dropped=%" PRIu64
+           " state_seq=%" PRIu64 " position=%.2f\n",
+           (uint64_t)(t / 1000000000ULL), (uint64_t)((t % 1000000000ULL) / 1000ULL), seq, dropped,
+           st->seq, (double)st->position_rad);
+}
+
+static int mode_subscribe(qmp_client_t *c, const char *topic, long want, long max_s, long slow_ms) {
+    int use_log;
+    if (strcmp(topic, "state") == 0) {
+        use_log = 0;
+    } else if (strcmp(topic, "log") == 0) {
+        use_log = 1;
+    } else {
+        fprintf(stderr, "joint_client: subscribe topic must be state or log\n");
+        return OUTCOME_USAGE;
+    }
+    if (want < 1 || want > LOOP_MAX || max_s < 1 || max_s > 3600 || slow_ms < 0 ||
+        slow_ms > 60000) {
+        fprintf(stderr, "joint_client: subscribe wants 1..%d updates within 1..3600 s\n", LOOP_MAX);
+        return OUTCOME_USAGE;
+    }
+    /* Must outlive the subscription (caller-provided storage, no heap). */
+    static demo_joint_v1_Joint_StateChanged_sub_t sub_state;
+    static demo_joint_v1_Joint_StateLog_sub_t sub_log;
+    sub_stats_t ss = {0, 0};
+    int rc = use_log
+                 ? demo_joint_v1_Joint_subscribe_StateLog(c, &sub_log, on_state_update, &ss)
+                 : demo_joint_v1_Joint_subscribe_StateChanged(c, &sub_state, on_state_update, &ss);
+    if (rc != EOK) {
+        LOGF("subscribe: failed rc=%d (%s)", rc, strerror(rc));
+        return rc;
+    }
+    LOGF("subscribe: topic=%s(0x%04X) want=%ld slow_ms=%ld",
+         use_log ? "StateLog/QUEUE" : "StateChanged/LATEST",
+         use_log ? DEMO_JOINT_V1_JOINT_T_STATELOG : DEMO_JOINT_V1_JOINT_T_STATECHANGED, want,
+         slow_ms);
+    const uint64_t deadline = now_ns() + (uint64_t)max_s * 1000000000ULL;
+    while (ss.updates < want && now_ns() < deadline) {
+        rc = qmp_client_poll(c, 1000000000ULL); /* 1 s slices to honour the deadline */
+        if (rc == EOK || rc == ETIMEDOUT) {
+            if (rc == EOK && slow_ms > 0) {
+                msleep((uint32_t)slow_ms); /* emulate a slow subscriber */
+            }
+            continue;
+        }
+        if (rc == ESRCH) {
+            /* Server died mid-stream: reconnect re-handshakes and resubscribes. */
+            LOGF("subscribe: server gone, reconnecting");
+            rc = qmp_client_reconnect(c);
+            LOGF("subscribe: qmp_client_reconnect -> %d (%s) generation=%" PRIu32, rc, strerror(rc),
+                 qmp_client_server_generation(c));
+            if (rc != EOK && rc != EAGAIN) {
+                return rc;
+            }
+            continue;
+        }
+        LOGF("subscribe: poll failed rc=%d (%s)", rc, strerror(rc));
+        return rc;
+    }
+    printf("subscribe: updates=%ld dropped_total=%" PRIu64 "\n", ss.updates, ss.dropped_total);
+    return ss.updates >= want ? EOK : ETIMEDOUT;
+}
+
 static int usage(const char *argv0) {
     fprintf(stderr,
             "usage: %s [--timeout MS] [--expect ERRNO] [--fake] once | loop N [WARMUP] |"
-            " slow MS sleep|spin | late MS | reconnect [MAX_S]\n",
+            " slow MS sleep|spin | late MS | reconnect [MAX_S] |"
+            " subscribe [state|log] [N] [MAX_S] [SLOW_MS]\n",
             argv0);
     return 2;
 }
@@ -343,6 +431,10 @@ int main(int argc, char **argv) {
         outcome = mode_late(&c, atol(argv[i]));
     } else if (strcmp(mode, "reconnect") == 0) {
         outcome = mode_reconnect(&c, i < argc ? atol(argv[i]) : 60);
+    } else if (strcmp(mode, "subscribe") == 0) {
+        outcome = mode_subscribe(
+            &c, i < argc ? argv[i] : "state", i + 1 < argc ? atol(argv[i + 1]) : 10,
+            i + 2 < argc ? atol(argv[i + 2]) : 30, i + 3 < argc ? atol(argv[i + 3]) : 0);
     } else {
         outcome = OUTCOME_USAGE;
     }

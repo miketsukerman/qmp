@@ -9,6 +9,9 @@
 # against a quiet server, pidin/kernel-state capture during an in-flight call, client
 # death, server death (mid-call with reconnect, and a call made after the death),
 # priority inheritance with a spinning call, and in-flight cancellation.
+# Part 3 (topics, ADR-003 notify-then-pull): normal delivery, a slow subscriber in
+# LATEST and QUEUE mode with explicit loss accounting, kill -9 of a subscriber
+# mid-stream, and a server restart with automatic resubscribe.
 #
 # Usage:   scripts/target-smoke.sh
 # Example: QMP_TARGET=qnxuser@192.168.1.50 scripts/target-smoke.sh
@@ -332,6 +335,75 @@ fi
 t "cat '$QMP_TARGET_DIR/jsrv6.log'" || true
 t "kill -9 $SPID 2>/dev/null || true"
 result joint-cancel "$rc"
+
+# ---- topic scenarios (ADR-003 notify-then-pull) --------------------------------------------
+
+note "joint 7: topics, normal delivery — 50 ms publisher, LATEST subscriber prints 20 updates"
+SPID=$(start_jsrv jsrv7.log --publish-ms 50)
+track "$SPID"
+rc=0; t "'$JCLI' subscribe state 20 30" || rc=$?
+result joint-topic-normal "$rc"
+t "kill -9 $SPID 2>/dev/null || true"
+
+note "joint 7b: slow subscriber, LATEST — 5 ms publisher, 300 ms poll sleep: skips to newest"
+SPID=$(start_jsrv jsrv7b.log --publish-ms 5)
+track "$SPID"
+rc=0
+t "'$JCLI' subscribe state 10 30 300 > '$QMP_TARGET_DIR/jcli7b.log' 2>&1" || rc=$?
+# LATEST mode must overwrite: with ~60 updates per poll interval the subscriber has to
+# report dropped > 0 somewhere; silent loss would be a bug.
+t "grep -q '^PASS subscribe' '$QMP_TARGET_DIR/jcli7b.log'" || rc=$?
+t "grep -Eq 'dropped=[1-9]' '$QMP_TARGET_DIR/jcli7b.log'" || rc=$?
+t "cat '$QMP_TARGET_DIR/jcli7b.log'" || true
+result joint-topic-slow-latest "$rc"
+t "kill -9 $SPID 2>/dev/null || true"
+
+note "joint 7c: slow subscriber, QUEUE depth 8 — backlog replays in order, overflow is counted"
+SPID=$(start_jsrv jsrv7c.log --publish-ms 5)
+track "$SPID"
+rc=0
+t "'$JCLI' subscribe log 40 30 300 > '$QMP_TARGET_DIR/jcli7c.log' 2>&1" || rc=$?
+t "grep -q '^PASS subscribe' '$QMP_TARGET_DIR/jcli7c.log'" || rc=$?
+# With ~60 publishes per 300 ms sleep and a depth of 8, overflow must be reported.
+t "grep -Eq 'dropped=[1-9]' '$QMP_TARGET_DIR/jcli7c.log'" || rc=$?
+t "cat '$QMP_TARGET_DIR/jcli7c.log'" || true
+result joint-topic-slow-queue "$rc"
+t "kill -9 $SPID 2>/dev/null || true"
+
+note "joint 7d: kill -9 of a subscriber mid-stream — publisher keeps serving the others"
+SPID=$(start_jsrv jsrv7d.log --publish-ms 50 --verbose)
+track "$SPID"
+VPID=$(t "'$JCLI' subscribe state 1000 60 > '$QMP_TARGET_DIR/jcli7d-victim.log' 2>&1 & echo \$!" | tr -d '\r')
+track "$VPID"
+CPID=$(t "'$JCLI' subscribe state 100 60 > '$QMP_TARGET_DIR/jcli7d-survivor.log' 2>&1 & echo \$!" | tr -d '\r')
+track "$CPID"
+sleep 2
+t "kill -9 $VPID 2>/dev/null || true"
+rc=0
+# The server must observe the dead subscriber's disconnect and free its slot...
+wait_for 'client disconnected' jsrv7d.log 10 || rc=$?
+# ...while the survivor keeps receiving until its 100 updates are in.
+wait_for '^PASS subscribe' jcli7d-survivor.log 30 || rc=$?
+t "tail -5 '$QMP_TARGET_DIR/jcli7d-survivor.log'" || true
+result joint-topic-subscriber-death "$rc"
+t "kill -9 $SPID 2>/dev/null || true"
+
+note "joint 7e: server restart mid-stream — subscriber reconnects, resubscribes, updates resume"
+SPID=$(start_jsrv jsrv7e-a.log --publish-ms 50)
+track "$SPID"
+CPID=$(t "'$JCLI' subscribe state 200 60 > '$QMP_TARGET_DIR/jcli7e.log' 2>&1 & echo \$!" | tr -d '\r')
+track "$CPID"
+sleep 2                       # a few updates have arrived on the first session
+t "kill -9 $SPID"
+sleep 2                       # the subscriber sees ESRCH and starts reconnecting
+SPID=$(start_jsrv jsrv7e-b.log --publish-ms 50)
+track "$SPID"
+rc=0
+wait_for 'subscribe: qmp_client_reconnect -> 0' jcli7e.log 30 || rc=$?
+wait_for '^PASS subscribe' jcli7e.log 40 || rc=$?
+t "tail -8 '$QMP_TARGET_DIR/jcli7e.log'" || true
+result joint-topic-server-restart "$rc"
+t "kill -9 $SPID 2>/dev/null || true"
 
 echo
 if [ "$fails" -eq 0 ]; then

@@ -10,8 +10,12 @@
  * scripts/target-smoke.sh.
  *
  * Usage: qmp_joint_server [--threads N] [--verbose] [--fake] [--fixed-priority]
- *                         [--selftest]
+ *                         [--publish-ms N] [--selftest]
  *   --threads N        worker threads, 1..QMP_SERVER_MAX_THREADS (default 2)
+ *   --publish-ms N     publish the StateChanged (LATEST) and StateLog (QUEUE depth 8)
+ *                      topics every N ms (1..60000; off by default). Subscribers are
+ *                      notified with MsgDeliverEvent and pull the sample (ADR-003); a
+ *                      slow or dead subscriber never blocks this.
  *   --verbose          log each call and reply (off by default: no fast-path logging)
  *   --fake             allow the in-process fake transport (host); otherwise the server
  *                      refuses to start when the default transport is not "qnx"
@@ -211,6 +215,44 @@ static void on_client_gone(void *ctx, int32_t pid) {
     LOGF("client disconnected pid=%" PRId32, pid);
 }
 
+/* ---- topic publisher: StateChanged every --publish-ms milliseconds ------------------- */
+
+typedef struct pub_ctx {
+    qmp_server_t *server;
+    srv_state_t *state;
+    uint32_t period_ms;
+    volatile sig_atomic_t stop;
+} pub_ctx_t;
+
+static void *publisher_thread(void *arg) {
+    pub_ctx_t *pc = (pub_ctx_t *)arg;
+    struct timespec period = {pc->period_ms / 1000U, (long)(pc->period_ms % 1000U) * 1000000L};
+    static const char mode[] = "hold";
+    while (!pc->stop) {
+        demo_joint_v1_JointState st;
+        memset(&st, 0, sizeof(st));
+        st.seq = ++pc->state->seq;
+        st.timestamp_ns = now_ns();
+        st.position_rad = pc->state->position_rad;
+        st.velocity = 0.0f;
+        st.mode.len = (uint16_t)(sizeof(mode) - 1);
+        memcpy(st.mode.data, mode, sizeof(mode) - 1);
+        int rc = demo_joint_v1_Joint_publish_StateChanged(pc->server, &st);
+        if (rc == EOK) {
+            rc = demo_joint_v1_Joint_publish_StateLog(pc->server, &st);
+        }
+        if (rc != EOK) {
+            LOGF("publish failed rc=%d (%s); publisher stops", rc, strerror(rc));
+            return NULL;
+        }
+        if (pc->state->verbose) {
+            LOGF("published seq=%" PRIu64, st.seq);
+        }
+        (void)nanosleep(&period, NULL);
+    }
+    return NULL;
+}
+
 /* ---- shutdown: a dedicated thread sigwait()s for SIGINT/SIGTERM ---------------------- */
 
 typedef struct sig_ctx {
@@ -267,10 +309,12 @@ static void *selftest_client(void *arg) {
 static uint64_t
     g_workbuf[QMP_SERVER_WORKBUF_SIZE(DEMO_JOINT_V1_JOINT_MAX_MSG_SIZE, QMP_SERVER_MAX_THREADS) /
               8];
+static uint64_t g_topicbuf[DEMO_JOINT_V1_JOINT_TOPIC_STORAGE_SIZE / 8 + 1];
 
 static int usage(const char *argv0) {
     fprintf(stderr,
-            "usage: %s [--threads N] [--verbose] [--fake] [--fixed-priority] [--selftest]\n",
+            "usage: %s [--threads N] [--verbose] [--fake] [--fixed-priority] [--publish-ms N] "
+            "[--selftest]\n",
             argv0);
     return 2;
 }
@@ -281,9 +325,12 @@ int main(int argc, char **argv) {
     int use_fake = 0;
     int selftest = 0;
     int fixed_priority = 0;
+    long publish_ms = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             nthreads = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--publish-ms") == 0 && i + 1 < argc) {
+            publish_ms = atol(argv[++i]);
         } else if (strcmp(argv[i], "--verbose") == 0) {
             verbose = 1;
         } else if (strcmp(argv[i], "--fake") == 0) {
@@ -299,6 +346,10 @@ int main(int argc, char **argv) {
     }
     if (nthreads < 1 || nthreads > QMP_SERVER_MAX_THREADS) {
         fprintf(stderr, "joint_server: --threads must be 1..%d\n", QMP_SERVER_MAX_THREADS);
+        return 2;
+    }
+    if (publish_ms < 0 || publish_ms > 60000) {
+        fprintf(stderr, "joint_server: --publish-ms must be 1..60000\n");
         return 2;
     }
 
@@ -332,7 +383,9 @@ int main(int argc, char **argv) {
                             .verbose = verbose,
                             .workbuf = g_workbuf,
                             .workbuf_size = sizeof(g_workbuf),
-                            .on_client_gone = on_client_gone};
+                            .on_client_gone = on_client_gone,
+                            .topicbuf = g_topicbuf,
+                            .topicbuf_size = sizeof(g_topicbuf)};
     int rc = qmp_server_init(&server, &cfg);
     if (rc == EOK) {
         rc = demo_joint_v1_Joint_register(&server, 0, &ops, &state);
@@ -350,10 +403,24 @@ int main(int argc, char **argv) {
     }
 
     LOGF("started pid=%d build=%s service=%s path=%s transport=%s threads=%d fixed_priority=%d "
-         "generation=%" PRIu32,
+         "publish_ms=%ld generation=%" PRIu32,
          (int)getpid(), QMP_BUILD_ID, DEMO_JOINT_V1_JOINT_SERVICE_NAME,
-         DEMO_JOINT_V1_JOINT_QNX_PATH, tr->name, nthreads, fixed_priority,
+         DEMO_JOINT_V1_JOINT_QNX_PATH, tr->name, nthreads, fixed_priority, publish_ms,
          qmp_server_generation(&server));
+
+    static pub_ctx_t pc;
+    pthread_t pub_thread;
+    int publishing = 0;
+    if (publish_ms > 0) {
+        pc.server = &server;
+        pc.state = &state;
+        pc.period_ms = (uint32_t)publish_ms;
+        if (pthread_create(&pub_thread, NULL, publisher_thread, &pc) != 0) {
+            fprintf(stderr, "joint_server: cannot create publisher thread\n");
+            return 1;
+        }
+        publishing = 1;
+    }
 
     int result = 0;
 #if !defined(__QNX__)
@@ -368,6 +435,10 @@ int main(int argc, char **argv) {
     }
 #endif
     rc = qmp_server_run(&server); /* until a signal (or the selftest) stops it */
+    if (publishing) {
+        pc.stop = 1;
+        (void)pthread_join(pub_thread, NULL);
+    }
 #if !defined(__QNX__)
     if (selftest) {
         void *ret = NULL;

@@ -104,9 +104,9 @@ Control opcodes (`QMP_F_CONTROL` set; `resource_id` field):
 | op | value | request payload | reply payload |
 |----|-------|-----------------|---------------|
 | `QMP_OP_HELLO` | 1 | `qmp_hello_t {u16 service_id; u16 instance_id; u8 ver_major; u8 ver_minor; u8 pad[2];}` | `qmp_hello_reply_t {u8 ver_major; u8 ver_minor; u8 pad[2]; u32 server_generation; u32 max_msg_size; u32 pad2;}` — or `MsgError(ENOTSUP)` on major mismatch |
-| `QMP_OP_SUBSCRIBE` | 2 | `qmp_subscribe_t {u16 topic_id; u16 pad; int32 event_handle; u64 client_cookie;}` | `qmp_subscribe_reply_t {u32 sub_id; u32 mode; u64 current_seq;}` |
-| `QMP_OP_UNSUBSCRIBE` | 3 | `{u32 sub_id; u32 pad;}` | empty |
-| `QMP_OP_PULL` | 4 | `qmp_pull_t {u32 sub_id; u32 max_samples; u64 after_seq;}` | `qmp_pull_reply_t {u64 seq; u32 remaining; u32 count;}` + `count` sample structs |
+| `QMP_OP_SUBSCRIBE` | 2 | `qmp_subscribe_t {u16 topic_id; u16 event_len; u8 pad[4]; u8 event[64];}` — `event` is the client's **registered** `struct sigevent`, rewritten in place by `MsgRegisterEvent` (V-QNX-042); opaque to the core | `qmp_subscribe_reply_t {u32 sub_id; u16 mode; u16 depth; u64 seq;}` — `seq` is the newest published sequence (0 = none yet); only *newer* updates are delivered |
+| `QMP_OP_UNSUBSCRIBE` | 3 | `qmp_unsubscribe_t {u32 sub_id; u8 pad[4];}` | empty |
+| `QMP_OP_PULL` | 4 | `qmp_pull_t {u16 topic_id; u8 pad[6]; u64 after_seq;}` — `after_seq` is the newest sequence the client has consumed; the source of truth (pulses are advisory, V-QNX-044) | `qmp_pull_reply_t {u64 seq; u64 dropped; u32 remaining; u32 count;}` + `count` (0 or 1 in v1) sample structs; `dropped` counts overwritten/overflowed updates, never hidden; `remaining > 0` ⇒ pull again |
 
 Payload rules (generator-enforced):
 
@@ -247,27 +247,40 @@ server base priority, not caller priority) is documented in the handler callback
  init: chid_c = ChannelCreate(_NTO_CHF_COID_DISCONNECT|_NTO_CHF_UNBLOCK)
        self_coid = ConnectAttach(0,0,chid_c,...)
  subscribe_StateChanged(c,&sub,cb,ctx):
-   SIGEV_PULSE_INIT(&ev, self_coid, SIGEV_PULSE_PRIO_INHERIT, QMP_PULSE_TOPIC, sub_idx)
-   SIGEV_MAKE_UPDATEABLE(&ev)                                       VERIFY V-QNX-008
-   h = MsgRegisterEvent(&ev, coid_server)                           VERIFY V-QNX-007
-   MsgSendv([hdr CONTROL/SUBSCRIBE, {topic 0x8001, event_handle h}]) ──► register (scoid,pid,topic,h)
- ◄──────────────────────────────── [{sub_id=3, mode=LATEST, current_seq=41}]
+   SIGEV_PULSE_INIT(&ev, self_coid, SIGEV_PULSE_PRIO_INHERIT, QMP_PULSE_TOPIC, 0)
+   SIGEV_MAKE_UPDATEABLE(&ev)                                       VERIFY V-QNX-045
+   MsgRegisterEvent(&ev, coid_server)   /* rewrites ev in place */  VERIFY V-QNX-042
+   MsgSendv([hdr CONTROL/SUBSCRIBE, {topic 0x8001, event blob = ev}]) ► register (scoid,rcvid,topic,ev)
+ ◄──────────────────────────────── [{sub_id=3, mode=LATEST, depth=1, seq=41}]
 
  ... later, server publish_StateChanged(&sample):
-                                                                     copy sample into topic slot (LATEST) seq=42
+                                                                     lock: copy sample into slot, seq=42,
+                                                                     snapshot subscribers; unlock
                                                                      for each subscriber: MsgDeliverEvent(rcvid, &ev)
-                                                                       with pulse value = (uint32)seq   (no lock held)
- ◄~~~ pulse on chid_c  {code QMP_PULSE_TOPIC, value seq=42} ────────── (ESRCH/EACCES → drop subscriber)
+                                                                       with pulse value = seq   (no lock held)
+ ◄~~~ pulse on chid_c  {code QMP_PULSE_TOPIC, value seq=42} ────────── (ESRCH/EACCES/EBADF → drop subscriber;
+                                                                        EAGAIN = pulse lost, fine: V-QNX-044)
  qmp_client_poll(c, timeout):
-   MsgReceivePulse(chid_c) → code/value
-   if value > sub.last_seq:
-     MsgSendv([hdr CONTROL/PULL,{sub_id 3, max 1, after 41}]) ──────► reply [{seq 42, remaining 0, count 1}][JointState]
-     cb(ctx, &sample, 42) on the polling thread
+   MsgReceivePulse(chid_c)             /* value is advisory only */
+   for every active sub:               /* drain; the cursor is the source of truth */
+     MsgSendv([hdr CONTROL/PULL,{topic 0x8001, after 41}]) ─────────► reply [{seq 42, dropped 0, remaining 0, count 1}][JointState]
+     cb(ctx, &sample, len, 42, dropped) on the polling thread; repeat while remaining > 0
 ```
 
-Pulse coalescing is a feature: in LATEST mode the client only ever pulls the newest sample.
-In QUEUE{depth} mode the server keeps a ring per topic; `remaining` tells the client to pull
-again. The server **never** MsgSends to a client (deadlock-free by construction).
+Pulse coalescing is a feature: in LATEST mode the client only ever pulls the newest sample
+and `dropped` counts the overwritten ones. In QUEUE{depth} mode the server keeps a ring per
+topic; `remaining` tells the client to pull again and overflow surfaces as `dropped`. The
+server **never** MsgSends to a client (deadlock-free by construction).
+
+Deltas vs the original sketch (implemented in W3): SUBSCRIBE carries the whole registered
+`sigevent` as an opaque ≤64-byte blob, not an int32 handle — `MsgRegisterEvent` rewrites the
+struct and the server must pass it back verbatim (V-QNX-042). PULL is keyed by `topic_id` +
+`after_seq` (not `sub_id`) and returns at most one sample, plus an explicit 64-bit `dropped`
+count. The topic storage lives in a caller-provided `cfg.topicbuf`
+(`QMP_TOPIC_STATE_SIZE`/`QMP_SUBTABLE_SIZE`, no heap); `topicbuf == NULL` disables topics
+(register succeeds, SUBSCRIBE/publish fail `ENOTSUP`). After a server restart, subscription
+ids and event registrations die with the connection; `qmp_client_reconnect` re-registers and
+re-subscribes automatically (V-QNX-046).
 
 ### 3.6 Client crash
 

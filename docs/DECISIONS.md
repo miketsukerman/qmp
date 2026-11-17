@@ -75,6 +75,30 @@ priority-inheriting `MsgSend`, so a high-priority subscriber is served first. âˆ
 (pulse + pull) per delivered sample instead of one; measured in W4. âˆ’ A large sample still costs
 one copy per subscriber; shm handles (stretch) address bulk data.
 
+**Amendment (2026-12, W3 implementation).** Three details changed when the design met the
+kernel API:
+
+1. *Event blob, not handle.* 8.0's `MsgRegisterEvent(&ev, coid)` rewrites the `sigevent`
+   **in place**; there is no separate int32 handle to send. SUBSCRIBE therefore carries the
+   whole registered `sigevent` as an opaque, bounded blob (`event[64]`, V-QNX-042) that the
+   server hands verbatim to `MsgDeliverEvent`. The core never interprets it, which also lets
+   the fake transport use its own registration record.
+2. *Cursor-keyed PULL.* PULL sends `{topic_id, after_seq}` instead of `{sub_id, max}` and the
+   reply gained a 64-bit `dropped` count. The pulse value (updateable, V-QNX-045) is advisory
+   only: pulses can coalesce or fail to queue (V-QNX-044), so `qmp_client_poll` drains every
+   subscription and the `after_seq` cursor is the single source of truth. Loss is reported,
+   never hidden: LATEST counts overwrites, QUEUE counts ring overflow, both per pull and in
+   the callback.
+3. *Caller-provided storage.* Topic slots/rings and the subscriber table live in
+   `qmp_server_cfg_t.topicbuf` sized by the generated `*_TOPIC_STORAGE_SIZE`
+   (`QMP_TOPIC_STATE_SIZE` + `QMP_SUBTABLE_SIZE`); bounds are explicit (`EAGAIN` when the
+   subscriber table is full) and `topicbuf == NULL` disables topics (`ENOTSUP`). Publish
+   snapshots the subscriber list under the lock and delivers events outside it; a dead
+   subscriber (`ESRCH`/`EACCES`/`EBADF` from deliver) is dropped on the spot, and
+   `_PULSE_CODE_DISCONNECT` cleanup removes all of a process's subscriptions. Registrations
+   die with the connection, so reconnect re-registers and re-subscribes; old sub ids are
+   rejected by the new generation (V-QNX-046).
+
 ---
 
 ## ADR-004 UDS transport for benchmarks and host tests only

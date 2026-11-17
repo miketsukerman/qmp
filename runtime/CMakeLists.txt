@@ -5,6 +5,7 @@ add_library(qmp STATIC
   core/errors.c
   core/client.c
   core/dispatch.c
+  core/topics.c
   core/server.c
   transport/fake/fake_transport.c)
 if(CMAKE_SYSTEM_NAME STREQUAL "QNX")

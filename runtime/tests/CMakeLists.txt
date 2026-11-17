@@ -13,7 +13,8 @@ add_executable(qmp_core_tests
   test_dispatch.cpp
   test_e2e_fake.cpp
   test_lifecycle_fake.cpp
-  test_cancel_fake.cpp)
+  test_cancel_fake.cpp
+  test_topics_fake.cpp)
 target_include_directories(qmp_core_tests PRIVATE "${PROJECT_SOURCE_DIR}/runtime")
 target_link_libraries(qmp_core_tests PRIVATE qmp::qmp qmp_test_joint GTest::gtest_main)
 qmp_set_warnings(qmp_core_tests)

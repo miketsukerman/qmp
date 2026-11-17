@@ -46,6 +46,12 @@ QMP_STATIC_ASSERT(offsetof(qmp_iov_t, len) == offsetof(iov_t, iov_len), "iov lay
 
 /* Internal stop pulse used by unblock(); workers daisy-chain it so every receiver wakes. */
 #define QMP_QNX_PULSE_STOP (_PULSE_CODE_MINAVAIL + 0)
+/* Topic notification pulse on the CLIENT's private channel (ADR-003). */
+#define QMP_QNX_PULSE_TOPIC (_PULSE_CODE_MINAVAIL + 1)
+
+/* The SUBSCRIBE event blob is the struct sigevent after MsgRegisterEvent() replaced its
+ * contents with the kernel handle (V-QNX-042). */
+QMP_STATIC_ASSERT(sizeof(struct sigevent) <= QMP_EVENT_BLOB_MAX, "sigevent fits event blob");
 
 /* ---- per-scoid credential cache (kernel-supplied, cached on first message) -- */
 #define QMP_QNX_CRED_CACHE 64
@@ -71,6 +77,8 @@ QMP_STATIC_ASSERT(sizeof(qnx_ep_impl_t) <= sizeof(qmp_endpoint_t), "endpoint sto
 
 typedef struct qnx_conn_impl {
     int coid;
+    int notify_chid; /* client's private notification channel, 0 = none */
+    int notify_coid; /* our own connection to it, for SIGEV_PULSE       */
 } qnx_conn_impl_t;
 QMP_STATIC_ASSERT(sizeof(qnx_conn_impl_t) <= sizeof(qmp_conn_t), "conn storage");
 
@@ -426,9 +434,154 @@ static int qnx_close(qmp_endpoint_t *ep_) {
     return rc;
 }
 
+/* ---- topics (ADR-003 notify-then-pull) -------------------------------------- */
+
+/* The client's private pulse channel. _NTO_CHF_COID_DISCONNECT delivers a
+ * _PULSE_CODE_COIDDEATH pulse here when one of this process's connections dies, which is
+ * how a blocked qmp_client_poll() learns the server is gone.
+ * VERIFY(qnx8): V-QNX-046 — COIDDEATH delivery to this channel on server death. */
+static int qnx_notify_open(qmp_conn_t *conn) {
+    qnx_conn_impl_t *c = (qnx_conn_impl_t *)(void *)conn;
+    if (c->notify_chid > 0) {
+        return EOK; /* idempotent */
+    }
+    int chid = ChannelCreate(_NTO_CHF_COID_DISCONNECT);
+    if (chid == -1) {
+        return errno != 0 ? errno : EIO;
+    }
+    int coid = ConnectAttach(0, 0, chid, _NTO_SIDE_CHANNEL, 0);
+    if (coid == -1) {
+        int err = errno != 0 ? errno : EIO;
+        (void)ChannelDestroy(chid);
+        return err;
+    }
+    c->notify_chid = chid;
+    c->notify_coid = coid;
+    return EOK;
+}
+
+static int qnx_notify_wait(qmp_conn_t *conn, uint64_t timeout_ns, int64_t *value) {
+    qnx_conn_impl_t *c = (qnx_conn_impl_t *)(void *)conn;
+    *value = 0;
+    if (c->notify_chid <= 0) {
+        return EINVAL;
+    }
+    for (;;) {
+        if (timeout_ns != 0) {
+            uint64_t ns = timeout_ns;
+            (void)TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_RECEIVE, NULL, &ns, NULL);
+        }
+        struct _pulse p;
+        memset(&p, 0, sizeof(p));
+        if (MsgReceivePulse(c->notify_chid, &p, sizeof(p), NULL) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return errno != 0 ? errno : EIO; /* ETIMEDOUT when the kernel timeout fired */
+        }
+        switch (p.code) {
+        case QMP_QNX_PULSE_TOPIC:
+            /* 64-bit pulse value in 8.0; never truncate (V-QNX-031). Advisory only. */
+            *value = (int64_t)(intptr_t)p.value.sival_ptr;
+            return EOK;
+        case _PULSE_CODE_COIDDEATH:
+            return ESRCH; /* a connection of ours died; the core re-handshakes */
+        default:
+            continue; /* unrelated pulse on the private channel: ignore */
+        }
+    }
+}
+
+static int qnx_notify_close(qmp_conn_t *conn) {
+    qnx_conn_impl_t *c = (qnx_conn_impl_t *)(void *)conn;
+    if (c->notify_coid > 0) {
+        (void)ConnectDetach(c->notify_coid);
+        c->notify_coid = 0;
+    }
+    if (c->notify_chid > 0) {
+        (void)ChannelDestroy(c->notify_chid);
+        c->notify_chid = 0;
+    }
+    return EOK;
+}
+
+/* Build a pulse event on the private channel and register it so that ONLY the connected
+ * server may deliver it; the kernel replaces the sigevent contents with a handle and
+ * refuses delivery of unregistered events with EACCES.
+ * VERIFY(qnx8): V-QNX-042 — MsgRegisterEvent(event, coid) restricts delivery to that
+ * connection's server and rewrites *event into the registered handle form.
+ * VERIFY(qnx8): V-QNX-045 — SIGEV_MAKE_UPDATEABLE lets the server put the sequence
+ * number into the pulse value at MsgDeliverEvent time. */
+static int qnx_event_register(qmp_conn_t *conn, uint8_t *blob, size_t cap, size_t *len) {
+    qnx_conn_impl_t *c = (qnx_conn_impl_t *)(void *)conn;
+    *len = 0;
+    if (c->notify_coid <= 0 || cap < sizeof(struct sigevent)) {
+        return EINVAL;
+    }
+    struct sigevent ev;
+    SIGEV_PULSE_INIT(&ev, c->notify_coid, SIGEV_PULSE_PRIO_INHERIT, QMP_QNX_PULSE_TOPIC, 0);
+    SIGEV_MAKE_UPDATEABLE(&ev);
+    if (MsgRegisterEvent(&ev, c->coid) == -1) {
+        return errno != 0 ? errno : EIO;
+    }
+    memcpy(blob, &ev, sizeof(ev));
+    *len = sizeof(ev);
+    return EOK;
+}
+
+static int qnx_event_unregister(qmp_conn_t *conn, const uint8_t *blob, size_t len) {
+    (void)conn;
+    if (len != sizeof(struct sigevent)) {
+        return EINVAL;
+    }
+    struct sigevent ev;
+    memcpy(&ev, blob, sizeof(ev));
+    if (MsgUnregisterEvent(&ev) == -1) {
+        return errno != 0 ? errno : EIO;
+    }
+    return EOK;
+}
+
+/* Deliver a subscriber's registered event. rcvid is the SUBSCRIBE message's receive id,
+ * which stays usable for MsgDeliverEvent after the reply while the client's connection
+ * lives — the classic ionotify pattern. Non-blocking: a slow subscriber never delays the
+ * publisher; a full pulse queue loses the pulse, the pull cursor recovers (V-QNX-044).
+ * VERIFY(qnx8): V-QNX-043 — rcvid validity for MsgDeliverEvent after MsgReply. */
+static int qnx_deliver(qmp_endpoint_t *ep_, int64_t rcvid, const uint8_t *blob, size_t len,
+                       int64_t value) {
+    (void)ep_;
+    if (len != sizeof(struct sigevent)) {
+        return EINVAL;
+    }
+    struct sigevent ev;
+    memcpy(&ev, blob, sizeof(ev));
+    /* Updateable registered pulse: the value the client sees is set here (V-QNX-045). */
+    ev.sigev_value.sival_ptr = (void *)(intptr_t)value;
+    if (MsgDeliverEvent((rcvid_t)rcvid, &ev) == -1) {
+        return errno != 0 ? errno : EIO; /* ESRCH/EACCES/EBADF: caller drops the sub */
+    }
+    return EOK;
+}
+
 static const qmp_transport_t g_qnx = {
-    "qnx",     qnx_connect, qnx_call,    qnx_disconnect, qnx_listen,        qnx_receive,
-    qnx_reply, qnx_error,   qnx_unblock, qnx_close,      qnx_receive_pulse, qnx_unblock_req,
+    "qnx",
+    qnx_connect,
+    qnx_call,
+    qnx_disconnect,
+    qnx_listen,
+    qnx_receive,
+    qnx_reply,
+    qnx_error,
+    qnx_unblock,
+    qnx_close,
+    qnx_receive_pulse,
+    qnx_unblock_req,
+    qnx_notify_open,
+    qnx_notify_wait,
+    qnx_notify_close,
+    qnx_event_register,
+    qnx_event_unregister,
+    qnx_deliver,
 };
 
 const qmp_transport_t *qmp_transport_qnx(void) {

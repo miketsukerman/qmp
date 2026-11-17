@@ -62,31 +62,105 @@ static void send_reply(qmp_server_impl_t *s, int64_t rcvid, const qmp_hdr_t *hdr
 
 static void handle_control(qmp_server_impl_t *s, const qmp_rcv_info_t *info, const qmp_hdr_t *h,
                            const uint8_t *payload, uint8_t *rep) {
-    if (h->resource_id != QMP_OP_HELLO) {
-        send_error(s, info->rcvid, ENOSYS); /* SUBSCRIBE/UNSUBSCRIBE/PULL: W3 */
-        return;
-    }
-    if (h->payload_len != sizeof(qmp_hello_t)) {
-        send_error(s, info->rcvid, EINVAL);
-        return;
-    }
-    qmp_hello_t hello;
-    memcpy(&hello, payload, sizeof(hello));
-    if (hello.service_id != s->desc->service_id || hello.instance_id != s->instance_id) {
-        send_error(s, info->rcvid, ENOENT);
-        return;
-    }
-    if (qmp_version_compatible(s->desc->ver_major, s->desc->ver_minor, hello.ver_major,
-                               hello.ver_minor) != EOK) {
-        send_error(s, info->rcvid, ENOTSUP);
-        return;
-    }
     qmp_hdr_t *rh = (qmp_hdr_t *)(void *)rep;
-    qmp_hello_reply_t hr = {s->desc->ver_major, s->desc->ver_minor, {0, 0},
-                            s->generation,      s->max_msg_size,    0};
-    qmp_hdr_init_reply(rh, h, 0, (uint32_t)sizeof(hr));
-    memcpy(rep + QMP_HDR_SIZE, &hr, sizeof(hr));
-    send_reply(s, info->rcvid, rh, rep + QMP_HDR_SIZE, sizeof(hr));
+    switch (h->resource_id) {
+    case QMP_OP_HELLO: {
+        if (h->payload_len != sizeof(qmp_hello_t)) {
+            send_error(s, info->rcvid, EINVAL);
+            return;
+        }
+        qmp_hello_t hello;
+        memcpy(&hello, payload, sizeof(hello));
+        if (hello.service_id != s->desc->service_id || hello.instance_id != s->instance_id) {
+            send_error(s, info->rcvid, ENOENT);
+            return;
+        }
+        if (qmp_version_compatible(s->desc->ver_major, s->desc->ver_minor, hello.ver_major,
+                                   hello.ver_minor) != EOK) {
+            send_error(s, info->rcvid, ENOTSUP);
+            return;
+        }
+        qmp_hello_reply_t hr = {s->desc->ver_major, s->desc->ver_minor, {0, 0},
+                                s->generation,      s->max_msg_size,    0};
+        qmp_hdr_init_reply(rh, h, 0, (uint32_t)sizeof(hr));
+        memcpy(rep + QMP_HDR_SIZE, &hr, sizeof(hr));
+        send_reply(s, info->rcvid, rh, rep + QMP_HDR_SIZE, sizeof(hr));
+        return;
+    }
+    case QMP_OP_SUBSCRIBE: {
+        if (h->payload_len != sizeof(qmp_subscribe_t)) {
+            send_error(s, info->rcvid, EINVAL);
+            return;
+        }
+        if (s->tr->deliver == NULL) {
+            send_error(s, info->rcvid, ENOSYS);
+            return;
+        }
+        qmp_subscribe_t sub;
+        memcpy(&sub, payload, sizeof(sub));
+        uint32_t idx = 0;
+        int rc = qmp_topic_find(s, sub.topic_id, &idx);
+        qmp_subscribe_reply_t sr = {0, 0, 0, 0};
+        if (rc == EOK) {
+            rc = qmp_topic_sub_add(s, idx, info, &sub, &sr);
+        }
+        if (rc != EOK) {
+            send_error(s, info->rcvid, rc);
+            return;
+        }
+        /* The rcvid is replied here but stays stored in the entry: on QNX it remains
+         * usable for MsgDeliverEvent while the connection lives (V-QNX-043). */
+        qmp_hdr_init_reply(rh, h, 0, (uint32_t)sizeof(sr));
+        memcpy(rep + QMP_HDR_SIZE, &sr, sizeof(sr));
+        send_reply(s, info->rcvid, rh, rep + QMP_HDR_SIZE, sizeof(sr));
+        return;
+    }
+    case QMP_OP_UNSUBSCRIBE: {
+        if (h->payload_len != sizeof(qmp_unsubscribe_t)) {
+            send_error(s, info->rcvid, EINVAL);
+            return;
+        }
+        qmp_unsubscribe_t un;
+        memcpy(&un, payload, sizeof(un));
+        int rc = qmp_topic_sub_remove(s, un.sub_id, info->scoid);
+        if (rc != EOK) {
+            send_error(s, info->rcvid, rc);
+            return;
+        }
+        qmp_hdr_init_reply(rh, h, 0, 0);
+        send_reply(s, info->rcvid, rh, NULL, 0);
+        return;
+    }
+    case QMP_OP_PULL: {
+        if (h->payload_len != sizeof(qmp_pull_t)) {
+            send_error(s, info->rcvid, EINVAL);
+            return;
+        }
+        qmp_pull_t pull;
+        memcpy(&pull, payload, sizeof(pull));
+        uint32_t idx = 0;
+        int rc = qmp_topic_find(s, pull.topic_id, &idx);
+        if (rc != EOK) {
+            send_error(s, info->rcvid, rc);
+            return;
+        }
+        qmp_pull_reply_t *pr = (qmp_pull_reply_t *)(void *)(rep + QMP_HDR_SIZE);
+        /* The work buffer is sized for hdr + pull reply + largest sample at register. */
+        rc = qmp_topic_pull(s, idx, pull.after_seq, pr, rep + QMP_HDR_SIZE + sizeof(*pr));
+        if (rc != EOK) {
+            send_error(s, info->rcvid, rc);
+            return;
+        }
+        uint32_t plen =
+            (uint32_t)sizeof(*pr) + (pr->count != 0 ? s->desc->topics[idx].sample_size : 0U);
+        qmp_hdr_init_reply(rh, h, 0, plen);
+        send_reply(s, info->rcvid, rh, rep + QMP_HDR_SIZE, plen);
+        return;
+    }
+    default:
+        send_error(s, info->rcvid, ENOSYS);
+        return;
+    }
 }
 
 /* ---- deferred-reply pool (slots live in caller-provided cfg storage) ----- */
@@ -430,6 +504,7 @@ void qmp_server_on_unblock(qmp_server_impl_t *s, int64_t rcvid) {
 void qmp_server_on_disconnect(qmp_server_impl_t *s, int32_t scoid, int32_t pid) {
     /* The client process is gone: its rcvids are dead, so cancel without MsgError. The
      * transport has already detached the connection (ConnectDetach on QNX). */
+    qmp_topic_drop_scoid(s, scoid); /* its subscriptions and event handles die with it */
     for (;;) {
         qmp_req_impl_t *r = claim_parked(s, 0, 0, scoid);
         if (r == NULL) {

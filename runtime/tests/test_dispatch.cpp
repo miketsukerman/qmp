@@ -40,7 +40,8 @@ TEST(Dispatch, GeneratedTableIsSortedAndSized) {
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[3].id, DEMO_JOINT_V1_JOINT_M_BURN);
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[3].in_size, sizeof(demo_joint_v1_BurnRequest));
     EXPECT_EQ(demo_joint_v1_Joint_desc.methods[3].out_size, sizeof(demo_joint_v1_BurnReply));
-    EXPECT_EQ(demo_joint_v1_Joint_desc.max_msg_size, QMP_HDR_SIZE + 48u);
+    /* largest payload is the 72-byte SUBSCRIBE control request (methods max at 48) */
+    EXPECT_EQ(demo_joint_v1_Joint_desc.max_msg_size, QMP_HDR_SIZE + 72u);
 }
 
 TEST(Dispatch, LookupHappyPath) {

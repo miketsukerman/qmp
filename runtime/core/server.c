@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Server lifecycle and worker threads (DESIGN §5.1). */
+#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 
@@ -41,16 +42,30 @@ int qmp_server_init(qmp_server_t *s, const qmp_server_cfg_t *cfg) {
     si->on_client_gone = cfg->on_client_gone;
     si->listen_flags = cfg->listen_flags;
     si->verbose = cfg->verbose != 0;
+    if (cfg->topicbuf != NULL) {
+        if (cfg->topicbuf_size == 0 || ((uintptr_t)cfg->topicbuf & 7U) != 0) {
+            return EINVAL;
+        }
+        si->topicbuf = (uint8_t *)cfg->topicbuf;
+        si->topicbuf_size = cfg->topicbuf_size;
+    }
     int mrc = pthread_mutex_init(&si->pool_mu, NULL);
     if (mrc != 0) {
         return mrc;
     }
+    mrc = pthread_mutex_init(&si->topic_mu, NULL);
+    if (mrc != 0) {
+        return mrc;
+    }
     /* Generation changes on every restart so clients can detect it (DESIGN §3.6). Low
-     * bits of the monotonic clock in ms mixed with the object address; never 0. */
+     * bits of the monotonic clock in ms mixed with the object address and a process-wide
+     * counter (back-to-back restarts land in the same millisecond); never 0. */
+    static atomic_uint g_gen_seq;
     struct timespec ts;
     (void)clock_gettime(CLOCK_MONOTONIC, &ts);
     uint32_t gen = (uint32_t)ts.tv_sec * 1000U + (uint32_t)(ts.tv_nsec / 1000000);
     gen ^= (uint32_t)(uintptr_t)si;
+    gen += (atomic_fetch_add(&g_gen_seq, 1U) + 1U) << 20;
     si->generation = gen != 0 ? gen : 1U;
     return EOK;
 }
@@ -73,12 +88,29 @@ int qmp_server_register(qmp_server_t *s, const qmp_service_desc_t *desc, uint16_
     if (need < QMP_HDR_SIZE + sizeof(qmp_hello_reply_t)) {
         need = QMP_HDR_SIZE + sizeof(qmp_hello_reply_t);
     }
+    for (size_t i = 0; i < desc->ntopics; i++) {
+        /* PULL replies carry qmp_pull_reply_t in front of the sample. */
+        uint32_t m =
+            QMP_HDR_SIZE + (uint32_t)sizeof(qmp_pull_reply_t) + desc->topics[i].sample_size;
+        if (need < m) {
+            need = m;
+        }
+    }
+    if (desc->ntopics > 0 && need < QMP_HDR_SIZE + sizeof(qmp_subscribe_t)) {
+        need = QMP_HDR_SIZE + sizeof(qmp_subscribe_t);
+    }
     need = (need + 7U) & ~7U;
     if (si->workbuf_size < QMP_SERVER_WORKBUF_SIZE(need, si->nthreads)) {
         return EMSGSIZE;
     }
-    int rc = qmp_service_path(si->path, sizeof(si->path), desc->service_id, instance_id,
-                              desc->ver_major);
+    si->desc = desc;
+    int rc = qmp_topics_init(si);
+    if (rc != EOK) {
+        si->desc = NULL;
+        return rc;
+    }
+    rc = qmp_service_path(si->path, sizeof(si->path), desc->service_id, instance_id,
+                          desc->ver_major);
     if (rc != EOK) {
         return rc;
     }

@@ -34,7 +34,8 @@ def test_reflection_describes_design_layouts(joint: GenResult) -> None:
     assert svc["service_id"] == 0x0101
     assert svc["uuri"] == "/101/1"
     assert svc["qnx_path"] == "qmp/0101-0000/v1"
-    assert svc["max_msg_size"] == 24 + 48
+    # largest payload: SUBSCRIBE request (72) and FETCH reply (24 + 48-byte JointState)
+    assert svc["max_msg_size"] == 24 + 72
     by_name = {m["name"]: m for m in svc["methods"]}
     assert by_name["SetTarget"]["uuri"] == "/101/1/1"
     assert by_name["SetTarget"]["in_size"] == 8

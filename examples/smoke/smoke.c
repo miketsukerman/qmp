@@ -158,8 +158,8 @@ static const qmp_method_desc_t g_methods[] = {
     {SMOKE_M_RACE, 0, sizeof(smoke_req_t), sizeof(smoke_rep_t), 0, NULL, h_race, "Race"},
 };
 
-static const qmp_service_desc_t g_desc = {SMOKE_SVC,      1,         0, QMP_HDR_SIZE + 16,
-                                          "qmp.smoke.v1", g_methods, 4};
+static const qmp_service_desc_t g_desc = {
+    SMOKE_SVC, 1, 0, QMP_HDR_SIZE + 16, "qmp.smoke.v1", g_methods, 4, NULL, 0};
 
 #define SMOKE_THREADS 2
 static uint64_t g_workbuf[QMP_SERVER_WORKBUF_SIZE(QMP_HDR_SIZE + 16, SMOKE_THREADS) / 8 + 1];

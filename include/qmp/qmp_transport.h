@@ -99,6 +99,33 @@ typedef struct qmp_transport {
      * asking to be unblocked (QNX: MsgInfo _NTO_MI_UNBLOCK_REQ), 0 when it is not (stale
      * pulse, or the rcvid is gone/reused by a client that still wants the reply). */
     int (*unblock_req)(qmp_endpoint_t *ep, int64_t rcvid);
+
+    /* ---- topics (ADR-003 notify-then-pull). Optional as a group: when notify_open is
+     * NULL the transport has no notification support and subscribe fails with ENOSYS. */
+
+    /* Client: create the private notification channel (QNX: ChannelCreate with
+     * _NTO_CHF_COID_DISCONNECT + a side-channel connection to self). One per connection;
+     * idempotent. Never called on the publish path. */
+    int (*notify_open)(qmp_conn_t *conn);
+    /* Client: block until a notification pulse arrives on the private channel.
+     * Returns EOK (*value = 64-bit pulse value, advisory only), ETIMEDOUT (timeout_ns
+     * elapsed; 0 = block forever), ESRCH when the server connection died
+     * (QNX: _PULSE_CODE_COIDDEATH — VERIFY(qnx8): V-QNX-046), ECANCELED after
+     * notify_close(). Thread: any single caller at a time. */
+    int (*notify_wait)(qmp_conn_t *conn, uint64_t timeout_ns, int64_t *value);
+    int (*notify_close)(qmp_conn_t *conn);
+    /* Client: build and register an event that ONLY the connected server may deliver
+     * (QNX: SIGEV_PULSE on the notify channel + MsgRegisterEvent(ev, server coid)).
+     * Writes the opaque registered blob (<= QMP_EVENT_BLOB_MAX) for SUBSCRIBE. */
+    int (*event_register)(qmp_conn_t *conn, uint8_t *blob, size_t cap, size_t *len);
+    int (*event_unregister)(qmp_conn_t *conn, const uint8_t *blob, size_t len);
+    /* Server: deliver a registered event to the subscriber identified by the rcvid of
+     * its SUBSCRIBE message (QNX: MsgDeliverEvent — the rcvid stays usable for event
+     * delivery after the reply, VERIFY(qnx8): V-QNX-043). Never blocks. value is the
+     * advisory pulse value (sequence number). Returns EOK, or ESRCH/EACCES/EBADF when
+     * the subscriber or its registration is gone (caller drops the subscription). */
+    int (*deliver)(qmp_endpoint_t *ep, int64_t rcvid, const uint8_t *blob, size_t len,
+                   int64_t value);
 } qmp_transport_t;
 
 /* In-process transport for unit tests (runtime/transport/fake). Thread-safe. */

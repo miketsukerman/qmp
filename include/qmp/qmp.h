@@ -112,6 +112,58 @@ typedef struct qmp_hello_reply {
 } qmp_hello_reply_t;
 QMP_STATIC_ASSERT(sizeof(qmp_hello_reply_t) == 16, "layout");
 
+/* ---- topics (DESIGN §3.5, ADR-003 notify-then-pull) ---------------------- */
+/* Delivery mode declared per topic with (qmp.topic_mode). */
+enum qmp_topic_mode {
+    QMP_TOPIC_LATEST = 0, /* one slot; a newer sample overwrites the older   */
+    QMP_TOPIC_QUEUE = 1,  /* ring of `depth` slots; overflow drops oldest    */
+};
+
+/* Transport-opaque registered-event blob carried inside SUBSCRIBE. On QNX it is the
+ * struct sigevent AFTER MsgRegisterEvent() replaced it with a kernel handle
+ * (VERIFY(qnx8): V-QNX-042); the fake transport stores its own registration record. */
+#define QMP_EVENT_BLOB_MAX 64U
+
+typedef struct qmp_subscribe {
+    uint16_t topic_id;  /* 0x8000..0xFFFF */
+    uint16_t event_len; /* bytes used in event[] */
+    uint8_t _pad0[4];
+    uint8_t event[QMP_EVENT_BLOB_MAX];
+} qmp_subscribe_t;
+QMP_STATIC_ASSERT(sizeof(qmp_subscribe_t) == 72, "layout");
+
+typedef struct qmp_subscribe_reply {
+    uint32_t sub_id; /* never 0; valid only for this server generation       */
+    uint16_t mode;   /* enum qmp_topic_mode                                  */
+    uint16_t depth;  /* ring depth (1 for LATEST)                            */
+    uint64_t seq;    /* newest published sequence number, 0 = none yet       */
+} qmp_subscribe_reply_t;
+QMP_STATIC_ASSERT(sizeof(qmp_subscribe_reply_t) == 16, "layout");
+
+typedef struct qmp_unsubscribe {
+    uint32_t sub_id;
+    uint8_t _pad0[4];
+} qmp_unsubscribe_t;
+QMP_STATIC_ASSERT(sizeof(qmp_unsubscribe_t) == 8, "layout");
+
+/* PULL: the sequence number is the source of truth, never the pulse (pulses can be
+ * coalesced or fail to queue — VERIFY(qnx8): V-QNX-044). */
+typedef struct qmp_pull {
+    uint16_t topic_id;
+    uint8_t _pad0[6];
+    uint64_t after_seq; /* newest sequence the client has already consumed */
+} qmp_pull_t;
+QMP_STATIC_ASSERT(sizeof(qmp_pull_t) == 16, "layout");
+
+/* Reply: this struct, then `count` (0 or 1 in v1) samples of the topic's message. */
+typedef struct qmp_pull_reply {
+    uint64_t seq;       /* sequence of the returned sample (count == 1)        */
+    uint64_t dropped;   /* updates lost between after_seq and seq; never hidden */
+    uint32_t remaining; /* newer samples still buffered: pull again             */
+    uint32_t count;     /* samples following this struct                        */
+} qmp_pull_reply_t;
+QMP_STATIC_ASSERT(sizeof(qmp_pull_reply_t) == 24, "layout");
+
 /* ---- handler return values ---------------------------------------------- */
 #define QMP_HANDLED  0    /* reply now with *out and *status                  */
 #define QMP_DEFERRED (-1) /* keep qmp_req_t*, reply later (W2)                */

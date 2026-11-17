@@ -15,6 +15,9 @@ from protoc_gen_qmp.model import Field, Kind, Universe, c_ident
 
 HDR_SIZE = 24
 MSG_ALIGN = 8
+# Topic control-plane wire sizes (include/qmp/qmp.h): qmp_subscribe_t and qmp_pull_reply_t.
+SUBSCRIBE_SIZE = 72
+PULL_REPLY_SIZE = 24
 
 _SCALAR_C = {
     Kind.BOOL: ("uint8_t", 1),

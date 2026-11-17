@@ -14,11 +14,25 @@
 extern "C" {
 #endif
 
-#define QMP_CLIENT_STORAGE_U64 24
+#define QMP_CLIENT_STORAGE_U64 40
+#define QMP_CLIENT_MAX_SUBS    8
+#define QMP_SUB_STORAGE_U64    24
 
 typedef struct qmp_client {
     uint64_t _storage[QMP_CLIENT_STORAGE_U64];
 } qmp_client_t;
+
+/* Caller-provided storage for one subscription (ADR-003). */
+typedef struct qmp_sub {
+    uint64_t _storage[QMP_SUB_STORAGE_U64];
+} qmp_sub_t;
+
+/* Called from qmp_client_poll() on the polling thread, once per pulled sample, in
+ * sequence order. sample points at the subscription's sample buffer and is valid for the
+ * duration of the call. dropped counts updates lost (overwritten in LATEST mode or
+ * pushed out of a full QUEUE ring) between the previous delivery and this one. */
+typedef void (*qmp_sub_cb_t)(void *ctx, const void *sample, uint32_t len, uint64_t seq,
+                             uint64_t dropped);
 
 typedef struct qmp_client_cfg {
     const qmp_transport_t *transport; /* NULL = qmp_transport_default()          */
@@ -61,8 +75,34 @@ int qmp_client_close(qmp_client_t *c);
  * §3.7). Compare qmp_client_server_generation() before and after to learn whether the
  * server restarted (it did when the value changed). Blocking: yes, up to the full backoff
  * schedule. Returns EOK, EISCONN if still connected, ENOTCONN if never connected, or the
- * last connect error (ENOENT, ETIMEDOUT, ...). */
+ * last connect error (ENOENT, ETIMEDOUT, ...).
+ * Active subscriptions are re-registered and re-subscribed on the new session: old
+ * subscription ids and event registrations die with the old connection, sequence numbers
+ * restart, and each subscription's cursor is reset to the restarted server's current
+ * sequence. When resubscription fails its errno is returned but the connection stays up;
+ * the failed subscription is dropped (its storage may be reused). */
 int qmp_client_reconnect(qmp_client_t *c);
+
+/* ---- topics (ADR-003 notify-then-pull) ----------------------------------- */
+/* Subscribe to a topic. sample_buf (8-byte aligned, sample_cap >= the topic's sample
+ * size) holds the pulled sample handed to cb. sub must stay alive until unsubscribe or
+ * close. Opens the private notification channel on first use. Only new updates are
+ * delivered: the cursor starts at the server's current sequence number.
+ * Returns EOK, ENOTCONN, ENOSYS (transport has no notification support), EAGAIN (client
+ * or server subscription table full), ENOENT (unknown topic). Blocking: yes (one call). */
+int qmp_client_subscribe(qmp_client_t *c, uint16_t topic_id, void *sample_buf, size_t sample_cap,
+                         qmp_sub_cb_t cb, void *ctx, qmp_sub_t *sub);
+
+/* Unsubscribe and release the slot. When the server is unreachable the local state is
+ * still released (the server cleans up on disconnect). Safe on an inactive sub. */
+int qmp_client_unsubscribe(qmp_client_t *c, qmp_sub_t *sub);
+
+/* Wait for a topic notification, then pull every pending update on every active
+ * subscription and run the callbacks (caller's thread). The pulse is only a hint:
+ * correctness depends on the pull cursor, not on every pulse arriving. Returns EOK (>= 0
+ * callbacks ran), ETIMEDOUT, ESRCH (server died; client marked disconnected — use
+ * qmp_client_reconnect()), EINVAL (no active subscription). timeout_ns 0 blocks forever. */
+int qmp_client_poll(qmp_client_t *c, uint64_t timeout_ns);
 
 int qmp_client_is_connected(const qmp_client_t *c);
 uint32_t qmp_client_server_generation(const qmp_client_t *c);

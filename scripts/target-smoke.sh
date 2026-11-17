@@ -40,9 +40,13 @@ for f in "$local_bin" "$local_jsrv" "$local_jcli"; do
     fi
 done
 
+# LogLevel=ERROR hides OpenSSH's per-connection warnings (e.g. the post-quantum key
+# exchange notice) so they do not drown the test output; real errors still print.
+SSH_OPTS="-o LogLevel=ERROR"
+
 # Client-side expansion into remote commands is intentional (paths are repo-controlled).
-# shellcheck disable=SC2029
-t() { ssh "$QMP_TARGET" "$@"; }
+# shellcheck disable=SC2029,SC2086
+t() { ssh $SSH_OPTS "$QMP_TARGET" "$@"; }
 
 # Every remote pid we start is recorded here and killed on exit, even after a failure.
 CLEANUP_PIDS=""
@@ -64,7 +68,8 @@ t "slay -f -9 qmp_smoke qmp_joint_server qmp_joint_client 2>/dev/null; true" || 
 # Upload to a temp name and rename into place: rename() succeeds even if a stale
 # process is still executing the old binary.
 push() { # $1 = local file, $2 = remote path
-    scp -q "$1" "$QMP_TARGET:$2.new"
+    # shellcheck disable=SC2086
+    scp -q $SSH_OPTS "$1" "$QMP_TARGET:$2.new"
     t "mv -f '$2.new' '$2'"
 }
 push "$local_bin" "$BIN"

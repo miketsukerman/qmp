@@ -37,9 +37,14 @@ fi
 name=$(basename "$rel")
 remote_bin="$QMP_TARGET_DIR/$name"
 
+# LogLevel=ERROR hides OpenSSH's per-connection warnings (e.g. the post-quantum key
+# exchange notice) so they do not drown the test output; real errors still print.
+SSH_OPTS="-o LogLevel=ERROR"
+
 # Client-side expansion into the remote command is intentional (paths are repo-controlled).
-# shellcheck disable=SC2029
-ssh "$QMP_TARGET" "mkdir -p '$QMP_TARGET_DIR'"
-scp -q "$local_bin" "$QMP_TARGET:$remote_bin"
-# shellcheck disable=SC2029
-ssh "$QMP_TARGET" "chmod +x '$remote_bin' && '$remote_bin' $*"
+# shellcheck disable=SC2029,SC2086
+ssh $SSH_OPTS "$QMP_TARGET" "mkdir -p '$QMP_TARGET_DIR'"
+# shellcheck disable=SC2086
+scp -q $SSH_OPTS "$local_bin" "$QMP_TARGET:$remote_bin"
+# shellcheck disable=SC2029,SC2086
+ssh $SSH_OPTS "$QMP_TARGET" "chmod +x '$remote_bin' && '$remote_bin' $*"

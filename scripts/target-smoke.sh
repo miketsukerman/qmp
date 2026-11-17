@@ -55,9 +55,21 @@ trap cleanup EXIT INT TERM
 track() { CLEANUP_PIDS="$CLEANUP_PIDS $1"; }
 
 t "mkdir -p '$QMP_TARGET_DIR'"
-scp -q "$local_bin" "$QMP_TARGET:$BIN"
-scp -q "$local_jsrv" "$QMP_TARGET:$JSRV"
-scp -q "$local_jcli" "$QMP_TARGET:$JCLI"
+
+# Best-effort: kill leftovers from an interrupted run so they neither hold the
+# binaries' text segments (scp would fail with ETXTBSY) nor squat on the service
+# name. slay may be missing on a minimal image; the rename below still protects us.
+t "slay -f -9 qmp_smoke qmp_joint_server qmp_joint_client 2>/dev/null; true" || true
+
+# Upload to a temp name and rename into place: rename() succeeds even if a stale
+# process is still executing the old binary.
+push() { # $1 = local file, $2 = remote path
+    scp -q "$1" "$QMP_TARGET:$2.new"
+    t "mv -f '$2.new' '$2'"
+}
+push "$local_bin" "$BIN"
+push "$local_jsrv" "$JSRV"
+push "$local_jcli" "$JCLI"
 t "chmod +x '$BIN' '$JSRV' '$JCLI'"
 
 # The target image is minimal: probe the utilities before relying on them.
@@ -107,7 +119,8 @@ stop_server "$SPID"
 note "scenario: kill -9 of the server mid-call, restart, reconnect"
 SPID=$(start_server)
 track "$SPID"
-t "'$BIN' reconnect > '$QMP_TARGET_DIR/reconnect.log' 2>&1 &" &
+CPID=$(t "'$BIN' reconnect > '$QMP_TARGET_DIR/reconnect.log' 2>&1 & echo \$!" | tr -d '\r')
+track "$CPID"
 sleep 2                       # the client is REPLY-blocked in the slow call now
 t "kill -9 $SPID"
 sleep 1
@@ -118,7 +131,6 @@ while [ "$i" -lt 30 ] && ! t "grep -qE '^(PASS|FAIL) reconnect' '$QMP_TARGET_DIR
     i=$((i + 1))
     sleep 1
 done
-wait || true
 rc=0; t "grep -q '^PASS reconnect' '$QMP_TARGET_DIR/reconnect.log'" || rc=$?
 t "cat '$QMP_TARGET_DIR/reconnect.log'" || true
 result reconnect "$rc"
@@ -208,7 +220,8 @@ result joint-client-death "$rc"
 note "joint 4: server death — kill -9 mid-call; client reports errno, reconnects, new generation"
 SPID=$(start_jsrv jsrv4a.log)
 track "$SPID"
-t "'$JCLI' --timeout 2000 reconnect 60 > '$QMP_TARGET_DIR/jcli4.log' 2>&1 &" &
+CPID=$(t "'$JCLI' --timeout 2000 reconnect 60 > '$QMP_TARGET_DIR/jcli4.log' 2>&1 & echo \$!" | tr -d '\r')
+track "$CPID"
 sleep 2                       # the client is connected and polling now
 t "kill -9 $SPID"
 sleep 2                       # let it observe the failure and start its backoff
@@ -216,7 +229,6 @@ SPID=$(start_jsrv jsrv4b.log)
 track "$SPID"
 rc=0
 wait_for '^(PASS|FAIL) reconnect' jcli4.log 40 || rc=$?
-wait || true
 if [ "$rc" -eq 0 ]; then
     t "grep -q '^PASS reconnect' '$QMP_TARGET_DIR/jcli4.log'" || rc=$?
 fi

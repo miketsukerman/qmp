@@ -17,6 +17,10 @@
  *               ETIMEDOUT, reconnect with backoff to the restarted server, expect a new
  *               generation and a working echo
  *   race        deferred reply racing a client timeout, both orderings
+ *   saturate    two Slow calls occupy both server workers; a third client's call with a
+ *               1000 ms timeout must stay SEND-blocked and return ETIMEDOUT at ~1000 ms
+ *               (the kernel timeout, not the server, ends it); then the two slow calls
+ *               complete and the server still answers
  */
 #include <inttypes.h>
 #include <pthread.h>
@@ -293,6 +297,77 @@ static int sc_reconnect(void) {
     return 0;
 }
 
+/* One Slow call on its own connection, run on a helper thread by sc_saturate. */
+typedef struct slow_job {
+    qmp_client_t *c;
+    int32_t delay_ms;
+    int rc;
+    int32_t value;
+} slow_job_t;
+
+static void *slow_job_main(void *arg) {
+    slow_job_t *j = (slow_job_t *)arg;
+    smoke_req_t in = {7, j->delay_ms};
+    smoke_rep_t out = {0, 0};
+    int32_t st = 0;
+    qmp_call_opts_t opts = {.timeout_ns = 10ULL * 1000 * 1000 * 1000};
+    j->rc = qmp_client_call(j->c, SMOKE_M_SLOW, &in, sizeof(in), &out, sizeof(out), &st, &opts);
+    if (j->rc == EOK && st != 0) {
+        j->rc = EPROTO;
+    }
+    j->value = out.value;
+    return NULL;
+}
+
+static uint64_t mono_ms(void) {
+    struct timespec ts;
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
+}
+
+static int sc_saturate(void) {
+    /* Connect all three first: the HELLO handshake itself needs a free worker. */
+    qmp_client_t busy[SMOKE_THREADS];
+    qmp_client_t third;
+    for (int k = 0; k < SMOKE_THREADS; k++) {
+        CHECK("connect busy client", smoke_connect(&busy[k]) == EOK);
+    }
+    CHECK("connect third client", smoke_connect(&third) == EOK);
+
+    slow_job_t jobs[SMOKE_THREADS];
+    pthread_t th[SMOKE_THREADS];
+    for (int k = 0; k < SMOKE_THREADS; k++) {
+        jobs[k] = (slow_job_t){&busy[k], 3000, -1, 0};
+        CHECK("start slow call", pthread_create(&th[k], NULL, slow_job_main, &jobs[k]) == 0);
+    }
+    msleep(300); /* both workers are inside h_slow now */
+
+    const uint64_t timeout_ms = 1000;
+    qmp_call_opts_t opts = {.timeout_ns = timeout_ms * 1000 * 1000};
+    uint64_t t0 = mono_ms();
+    int rc = call_echo(&third, &opts);
+    uint64_t dt = mono_ms() - t0;
+    printf("# third call with every worker busy returned %d (%s) after %" PRIu64 " ms\n", rc,
+           strerror(rc), dt);
+    CHECK("third call times out", rc == ETIMEDOUT);
+    /* Lower bound: a few ms of clock slack. Upper bound: well before the slow calls end
+     * (~3300 ms), so it was the timeout and not a freed worker that ended the call. */
+    CHECK("third call returned at ~1000 ms", dt + 5 >= timeout_ms && dt < timeout_ms + 250);
+
+    for (int k = 0; k < SMOKE_THREADS; k++) {
+        (void)pthread_join(th[k], NULL);
+        printf("# slow call %d returned %d (%s) v=%" PRId32 "\n", k, jobs[k].rc,
+               strerror(jobs[k].rc), jobs[k].value);
+        CHECK("slow call completes", jobs[k].rc == EOK && jobs[k].value == 8);
+    }
+    CHECK("server healthy afterwards", call_echo(&third, NULL) == EOK);
+    for (int k = 0; k < SMOKE_THREADS; k++) {
+        (void)qmp_client_close(&busy[k]);
+    }
+    (void)qmp_client_close(&third);
+    return 0;
+}
+
 static int sc_race(void) {
     qmp_client_t c;
     CHECK("connect", smoke_connect(&c) == EOK);
@@ -319,7 +394,7 @@ static int sc_race(void) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s server|echo|timeout|block|reconnect|race\n", argv[0]);
+        fprintf(stderr, "usage: %s server|echo|timeout|block|reconnect|race|saturate\n", argv[0]);
         return 2;
     }
     const char *mode = argv[1];
@@ -336,6 +411,8 @@ int main(int argc, char **argv) {
         rc = sc_reconnect();
     } else if (strcmp(mode, "race") == 0) {
         rc = sc_race();
+    } else if (strcmp(mode, "saturate") == 0) {
+        rc = sc_saturate();
     } else {
         fprintf(stderr, "unknown scenario: %s\n", mode);
         return 2;

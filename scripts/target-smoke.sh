@@ -3,8 +3,8 @@
 # Orchestrate the two-process smoke scenarios on a QNX target over SSH.
 #
 # Part 1 (qmp_smoke, hand-written service): timeout with a server that never replies,
-# kill -9 of a blocked client, kill -9 of the server with restart + reconnect, and a
-# deferred reply racing a client timeout.
+# kill -9 of a blocked client, kill -9 of the server with restart + reconnect, a
+# deferred reply racing a client timeout, and a timeout while every worker is busy.
 # Part 2 (qmp_joint_server / qmp_joint_client, generated Joint bindings): basic loop,
 # pidin/kernel-state capture during an in-flight call, client death, server death with
 # reconnect + generation change, and priority inheritance with a spinning call.
@@ -146,6 +146,13 @@ SPID=$(start_server)
 track "$SPID"
 rc=0; t "'$BIN' race" || rc=$?
 result race "$rc"
+stop_server "$SPID"
+
+note "scenario: both workers busy with slow calls; a third call times out at ~1000 ms"
+SPID=$(start_server)
+track "$SPID"
+rc=0; t "'$BIN' saturate" || rc=$?
+result saturate "$rc"
 stop_server "$SPID"
 
 # ---- joint scenarios: standalone qmp_joint_server / qmp_joint_client ----------------------

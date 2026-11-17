@@ -4,20 +4,30 @@
  * on a QNX target (pidin, kill -9, priority inheritance). Orchestrated by
  * scripts/target-smoke.sh; every mode can also be run by hand in a second SSH session.
  *
- * Usage: qmp_joint_client [--timeout MS] [--fake] <mode> [args]
+ * Usage: qmp_joint_client [--timeout MS] [--expect ERRNO] [--fake] <mode> [args]
  *   once                   one SetTarget + GetState round trip, print the state
- *   loop N                 N SetTarget calls; print min/median/max latency
+ *   loop N [WARMUP]        WARMUP uncounted SetTarget calls (default 100), then N timed
+ *                          ones; print min/median/p99/max latency in microseconds
  *   slow MS sleep|spin     one Burn call that keeps a server worker busy for MS ms
+ *   late MS                connect, sleep MS ms (the harness kills the server meanwhile),
+ *                          then make one GetState call and report its errno
  *   reconnect [MAX_S]      keep calling GetState; report every failure with its errno,
  *                          reconnect with backoff, exit 0 once the server generation
  *                          changed and a call succeeded (give up after MAX_S s, def. 60)
  *
  *   --timeout MS           per-call timeout (default: 5000; 0 = block forever)
+ *   --expect ERRNO         the mode is expected to fail with this errno name (ETIMEDOUT,
+ *                          ESRCH, ...): print PASS and exit 0 when the failing call
+ *                          returns exactly that, FAIL and exit 1 on success or any other
+ *                          error. Without it, success is PASS.
  *   --fake                 allow the in-process fake transport (host); otherwise the
  *                          client refuses to start when the transport is not "qnx"
  *
- * Exit code: 0 on success, 1 on any unexpected error, 2 on usage errors.
+ * Output: the last stdout line is "PASS <mode>" or "FAIL <mode>"; with --expect it also
+ * names the expected and the actual outcome.
+ * Exit code: 0 on PASS, 1 on FAIL, 2 on usage errors.
  */
+#include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -30,6 +40,52 @@
 #include "qmp_build_id.h"
 
 #define LOOP_MAX 1000000
+
+/* Mode outcome: EOK, the errno of the call that failed, or one of these. */
+#define OUTCOME_STATUS (-1) /* the call returned EOK with a non-zero application status */
+#define OUTCOME_USAGE  (-2) /* bad mode arguments: exit 2, no PASS/FAIL line             */
+
+/* errno names accepted by --expect (and used to print outcomes). */
+static const struct {
+    const char *name;
+    int value;
+} g_errnos[] = {
+    {"EOK", EOK},
+    {"ETIMEDOUT", ETIMEDOUT},
+    {"ESRCH", ESRCH},
+    {"ENOTCONN", ENOTCONN},
+    {"ECANCELED", ECANCELED},
+    {"EBADF", EBADF},
+    {"EPROTO", EPROTO},
+    {"EINVAL", EINVAL},
+    {"ENOTSUP", ENOTSUP},
+    {"EACCES", EACCES},
+    {"EBUSY", EBUSY},
+    {"ENOENT", ENOENT},
+    {"ECONNREFUSED", ECONNREFUSED},
+};
+
+static int errno_from_name(const char *name, int *out) {
+    for (size_t k = 0; k < sizeof(g_errnos) / sizeof(g_errnos[0]); k++) {
+        if (strcmp(g_errnos[k].name, name) == 0) {
+            *out = g_errnos[k].value;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static const char *outcome_name(int outcome) {
+    if (outcome == OUTCOME_STATUS) {
+        return "app-status";
+    }
+    for (size_t k = 0; k < sizeof(g_errnos) / sizeof(g_errnos[0]); k++) {
+        if (g_errnos[k].value == outcome) {
+            return g_errnos[k].name;
+        }
+    }
+    return strerror(outcome);
+}
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -81,46 +137,60 @@ static int mode_once(qmp_client_t *c) {
     int rc = demo_joint_v1_Joint_SetTarget(c, &req, &rep, &status);
     if (rc != EOK || status != 0) {
         LOGF("SetTarget failed rc=%d (%s) status=%" PRId32, rc, strerror(rc), status);
-        return 1;
+        return rc != EOK ? rc : OUTCOME_STATUS;
     }
     rc = demo_joint_v1_Joint_GetState(c, &st, &status);
     if (rc != EOK || status != 0) {
         LOGF("GetState failed rc=%d (%s) status=%" PRId32, rc, strerror(rc), status);
-        return 1;
+        return rc != EOK ? rc : OUTCOME_STATUS;
     }
     printf("state: seq=%" PRIu64 " position=%.2f mode=%.*s\n", st.seq, (double)st.position_rad,
            (int)st.mode.len, st.mode.data);
     return 0;
 }
 
-static int mode_loop(qmp_client_t *c, long n) {
-    if (n < 1 || n > LOOP_MAX) {
-        fprintf(stderr, "joint_client: loop count must be 1..%d\n", LOOP_MAX);
-        return 2;
+/* Latency in microseconds with one decimal, from nanoseconds. */
+#define US_FMT       "%" PRIu64 ".%" PRIu64 "us"
+#define US_ARGS(ns_) (uint64_t)((ns_) / 1000U), (uint64_t)(((ns_) % 1000U) / 100U)
+
+static int mode_loop(qmp_client_t *c, long n, long warmup) {
+    if (n < 1 || n > LOOP_MAX || warmup < 0 || warmup > LOOP_MAX) {
+        fprintf(stderr, "joint_client: loop count and warm-up must be 1..%d and 0..%d\n", LOOP_MAX,
+                LOOP_MAX);
+        return OUTCOME_USAGE;
     }
     uint64_t *lat = (uint64_t *)malloc((size_t)n * sizeof(*lat)); /* before any call */
     if (lat == NULL) {
-        return 1;
+        return ENOMEM;
     }
     demo_joint_v1_SetTargetRequest req = {0.1f, 1.0f};
     demo_joint_v1_SetTargetReply rep;
     int32_t status = 0;
-    for (long i = 0; i < n; i++) {
+    /* The warm-up faults in code and stack pages and settles caches on both sides; it is
+     * not timed. */
+    for (long i = -warmup; i < n; i++) {
         req.position_rad = (float)i;
         uint64_t t0 = now_ns();
         int rc = demo_joint_v1_Joint_SetTarget(c, &req, &rep, &status);
-        lat[i] = now_ns() - t0;
+        uint64_t dt = now_ns() - t0;
         if (rc != EOK || status != 0) {
             LOGF("call %ld failed rc=%d (%s) status=%" PRId32, i, rc, strerror(rc), status);
             free(lat);
-            return 1;
+            return rc != EOK ? rc : OUTCOME_STATUS;
+        }
+        if (i >= 0) {
+            lat[i] = dt;
         }
     }
     qsort(lat, (size_t)n, sizeof(*lat), cmp_u64);
-    printf("loop: n=%ld min=%" PRIu64 "us median=%" PRIu64 "us max=%" PRIu64 "us\n", n,
-           lat[0] / 1000U, lat[n / 2] / 1000U, lat[n - 1] / 1000U);
+    /* Nearest-rank percentiles: the smallest sample with at least p% of samples <= it. */
+    size_t p50 = ((size_t)n * 50U + 99U) / 100U - 1U;
+    size_t p99 = ((size_t)n * 99U + 99U) / 100U - 1U;
+    printf("loop: n=%ld warmup=%ld min=" US_FMT " median=" US_FMT " p99=" US_FMT " max=" US_FMT
+           "\n",
+           n, warmup, US_ARGS(lat[0]), US_ARGS(lat[p50]), US_ARGS(lat[p99]), US_ARGS(lat[n - 1]));
     free(lat);
-    return 0;
+    return EOK;
 }
 
 static int mode_slow(qmp_client_t *c, long ms, const char *variant) {
@@ -131,11 +201,11 @@ static int mode_slow(qmp_client_t *c, long ms, const char *variant) {
         spin = 0;
     } else {
         fprintf(stderr, "joint_client: slow variant must be sleep or spin\n");
-        return 2;
+        return OUTCOME_USAGE;
     }
     if (ms < 0 || ms > 600000) {
         fprintf(stderr, "joint_client: slow duration must be 0..600000 ms\n");
-        return 2;
+        return OUTCOME_USAGE;
     }
     demo_joint_v1_BurnRequest req = {(uint32_t)ms, (uint8_t)spin, {0}};
     demo_joint_v1_BurnReply rep = {0};
@@ -147,11 +217,31 @@ static int mode_slow(qmp_client_t *c, long ms, const char *variant) {
     if (rc != EOK || status != 0) {
         LOGF("slow: Burn failed rc=%d (%s) status=%" PRId32 " elapsed_ms=%" PRIu64, rc,
              strerror(rc), status, dt / 1000000U);
-        return 1;
+        return rc != EOK ? rc : OUTCOME_STATUS;
     }
     printf("slow: done rc=0 elapsed_ms=%" PRIu64 " iterations=%" PRIu64 "\n", dt / 1000000U,
            rep.iterations);
-    return 0;
+    return EOK;
+}
+
+static int mode_late(qmp_client_t *c, long ms) {
+    if (ms < 0 || ms > 600000) {
+        fprintf(stderr, "joint_client: late delay must be 0..600000 ms\n");
+        return OUTCOME_USAGE;
+    }
+    LOGF("late: connected, sleeping %ld ms before the call", ms);
+    msleep((uint32_t)ms);
+    demo_joint_v1_JointState st;
+    int32_t status = 0;
+    uint64_t t0 = now_ns();
+    int rc = demo_joint_v1_Joint_GetState(c, &st, &status);
+    uint64_t dt = now_ns() - t0;
+    LOGF("late: GetState -> rc=%d (%s) status=%" PRId32 " elapsed_us=%" PRIu64 " connected=%d", rc,
+         strerror(rc), status, dt / 1000U, qmp_client_is_connected(c));
+    if (rc != EOK) {
+        return rc;
+    }
+    return status != 0 ? OUTCOME_STATUS : EOK;
 }
 
 static int mode_reconnect(qmp_client_t *c, long max_s) {
@@ -166,7 +256,7 @@ static int mode_reconnect(qmp_client_t *c, long max_s) {
             uint32_t gen = qmp_client_server_generation(c);
             if (gen != gen0) {
                 printf("reconnect: generation changed %" PRIu32 " -> %" PRIu32 "\n", gen0, gen);
-                return 0;
+                return EOK;
             }
             msleep(200);
             continue;
@@ -180,13 +270,13 @@ static int mode_reconnect(qmp_client_t *c, long max_s) {
         }
     }
     LOGF("reconnect: gave up after %ld s without a generation change", max_s);
-    return 1;
+    return ETIMEDOUT;
 }
 
 static int usage(const char *argv0) {
     fprintf(stderr,
-            "usage: %s [--timeout MS] [--fake] once | loop N | slow MS sleep|spin |"
-            " reconnect [MAX_S]\n",
+            "usage: %s [--timeout MS] [--expect ERRNO] [--fake] once | loop N [WARMUP] |"
+            " slow MS sleep|spin | late MS | reconnect [MAX_S]\n",
             argv0);
     return 2;
 }
@@ -194,10 +284,18 @@ static int usage(const char *argv0) {
 int main(int argc, char **argv) {
     long timeout_ms = 5000;
     int use_fake = 0;
+    const char *expect_name = NULL;
+    int expect = EOK;
     int i = 1;
     for (; i < argc && strncmp(argv[i], "--", 2) == 0; i++) {
         if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             timeout_ms = atol(argv[++i]);
+        } else if (strcmp(argv[i], "--expect") == 0 && i + 1 < argc) {
+            expect_name = argv[++i];
+            if (errno_from_name(expect_name, &expect) != 0) {
+                fprintf(stderr, "joint_client: --expect: unknown errno name \"%s\"\n", expect_name);
+                return 2;
+            }
         } else if (strcmp(argv[i], "--fake") == 0) {
             use_fake = 1;
         } else {
@@ -234,19 +332,30 @@ int main(int argc, char **argv) {
          (int)getpid(), QMP_BUILD_ID, DEMO_JOINT_V1_JOINT_SERVICE_NAME, tr->name,
          qmp_client_server_generation(&c), timeout_ms);
 
+    int outcome;
     if (strcmp(mode, "once") == 0) {
-        rc = mode_once(&c);
+        outcome = mode_once(&c);
     } else if (strcmp(mode, "loop") == 0 && i < argc) {
-        rc = mode_loop(&c, atol(argv[i]));
+        outcome = mode_loop(&c, atol(argv[i]), i + 1 < argc ? atol(argv[i + 1]) : 100);
     } else if (strcmp(mode, "slow") == 0 && i + 1 < argc) {
-        rc = mode_slow(&c, atol(argv[i]), argv[i + 1]);
+        outcome = mode_slow(&c, atol(argv[i]), argv[i + 1]);
+    } else if (strcmp(mode, "late") == 0 && i < argc) {
+        outcome = mode_late(&c, atol(argv[i]));
     } else if (strcmp(mode, "reconnect") == 0) {
-        rc = mode_reconnect(&c, i < argc ? atol(argv[i]) : 60);
+        outcome = mode_reconnect(&c, i < argc ? atol(argv[i]) : 60);
     } else {
-        (void)qmp_client_close(&c);
-        return usage(argv[0]);
+        outcome = OUTCOME_USAGE;
     }
     (void)qmp_client_close(&c);
-    printf("%s %s\n", rc == 0 ? "PASS" : "FAIL", mode);
-    return rc;
+    if (outcome == OUTCOME_USAGE) {
+        return usage(argv[0]);
+    }
+    int pass = outcome == expect;
+    if (expect_name != NULL) {
+        printf("%s %s (expected %s, got %s)\n", pass ? "PASS" : "FAIL", mode, expect_name,
+               outcome_name(outcome));
+    } else {
+        printf("%s %s\n", pass ? "PASS" : "FAIL", mode);
+    }
+    return pass ? 0 : 1;
 }

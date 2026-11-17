@@ -5,9 +5,10 @@
 # Part 1 (qmp_smoke, hand-written service): timeout with a server that never replies,
 # kill -9 of a blocked client, kill -9 of the server with restart + reconnect, a
 # deferred reply racing a client timeout, and a timeout while every worker is busy.
-# Part 2 (qmp_joint_server / qmp_joint_client, generated Joint bindings): basic loop,
-# pidin/kernel-state capture during an in-flight call, client death, server death with
-# reconnect + generation change, and priority inheritance with a spinning call.
+# Part 2 (qmp_joint_server / qmp_joint_client, generated Joint bindings): latency loop
+# against a quiet server, pidin/kernel-state capture during an in-flight call, client
+# death, server death (mid-call with reconnect, and a call made after the death),
+# priority inheritance with a spinning call, and in-flight cancellation.
 #
 # Usage:   scripts/target-smoke.sh
 # Example: QMP_TARGET=qnxuser@192.168.1.50 scripts/target-smoke.sh
@@ -159,10 +160,11 @@ stop_server "$SPID"
 
 # Start qmp_joint_server in the background on the target; echoes its pid.
 # Runs in a $(...) subshell: callers must track the echoed pid themselves.
+# Pass --verbose for per-call logs; leave it off when measuring latency.
 start_jsrv() { # $1 = log name, $2.. = extra args
     _log="$QMP_TARGET_DIR/$1"
     shift
-    t "'$JSRV' --verbose $* > '$_log' 2>&1 & echo \$!" | tr -d '\r'
+    t "'$JSRV' $* > '$_log' 2>&1 & echo \$!" | tr -d '\r'
     sleep 1
 }
 
@@ -177,10 +179,11 @@ wait_for() {
     return 1
 }
 
-note "joint 1: basic — start server, loop of calls, clean SIGTERM shutdown"
+note "joint 1: basic — quiet server, 10000 timed calls after 1000 warm-up, clean SIGTERM"
+# No --verbose: per-call logging would be most of what the loop measures.
 SPID=$(start_jsrv jsrv1.log)
 track "$SPID"
-rc=0; t "'$JCLI' loop 200" || rc=$?
+rc=0; t "'$JCLI' loop 10000 1000" || rc=$?
 t "kill -15 $SPID 2>/dev/null || true"
 sleep 1
 if [ "$rc" -eq 0 ]; then
@@ -190,7 +193,7 @@ t "cat '$QMP_TARGET_DIR/jsrv1.log'" || true
 result joint-basic "$rc"
 
 note "joint 2: kernel states — pidin + /dev/name/local during an in-flight spin call"
-SPID=$(start_jsrv jsrv2.log)
+SPID=$(start_jsrv jsrv2.log --verbose)
 track "$SPID"
 CPID=$(t "'$JCLI' --timeout 0 slow 6000 spin > '$QMP_TARGET_DIR/jcli2.log' 2>&1 & echo \$!" | tr -d '\r')
 track "$CPID"
@@ -212,7 +215,7 @@ t "kill -9 $SPID 2>/dev/null || true"
 result joint-kernel-states "$rc"
 
 note "joint 3: client death — kill -9 the client mid-call; server logs it and keeps serving"
-SPID=$(start_jsrv jsrv3.log)
+SPID=$(start_jsrv jsrv3.log --verbose)
 track "$SPID"
 CPID=$(t "'$JCLI' --timeout 0 slow 5000 sleep > '$QMP_TARGET_DIR/jcli3.log' 2>&1 & echo \$!" | tr -d '\r')
 track "$CPID"
@@ -230,14 +233,14 @@ t "kill -9 $SPID 2>/dev/null || true"
 result joint-client-death "$rc"
 
 note "joint 4: server death — kill -9 mid-call; client reports errno, reconnects, new generation"
-SPID=$(start_jsrv jsrv4a.log)
+SPID=$(start_jsrv jsrv4a.log --verbose)
 track "$SPID"
 CPID=$(t "'$JCLI' --timeout 2000 reconnect 60 > '$QMP_TARGET_DIR/jcli4.log' 2>&1 & echo \$!" | tr -d '\r')
 track "$CPID"
 sleep 2                       # the client is connected and polling now
 t "kill -9 $SPID"
 sleep 2                       # let it observe the failure and start its backoff
-SPID=$(start_jsrv jsrv4b.log)
+SPID=$(start_jsrv jsrv4b.log --verbose)
 track "$SPID"
 rc=0
 wait_for '^(PASS|FAIL) reconnect' jcli4.log 40 || rc=$?
@@ -247,6 +250,21 @@ fi
 t "cat '$QMP_TARGET_DIR/jcli4.log'" || true
 t "kill -9 $SPID 2>/dev/null || true"
 result joint-server-death "$rc"
+
+note "joint 4b: server death before the call — the first call after it must return ESRCH"
+SPID=$(start_jsrv jsrv4c.log --verbose)
+track "$SPID"
+CPID=$(t "'$JCLI' --expect ESRCH late 3000 > '$QMP_TARGET_DIR/jcli4b.log' 2>&1 & echo \$!" | tr -d '\r')
+track "$CPID"
+sleep 1                       # the client is connected and sleeping, not inside a call
+t "kill -9 $SPID"
+rc=0
+wait_for '^(PASS|FAIL) late' jcli4b.log 15 || rc=$?
+if [ "$rc" -eq 0 ]; then
+    t "grep -q '^PASS late' '$QMP_TARGET_DIR/jcli4b.log'" || rc=$?
+fi
+t "cat '$QMP_TARGET_DIR/jcli4b.log'" || true
+result joint-call-after-server-death "$rc"
 
 note "joint 5: priority — low-prio server, high-prio client, spinning call, raw pidin capture"
 if [ "$HAVE_ON" -eq 1 ] && [ "$HAVE_PIDIN" -eq 1 ]; then
@@ -294,16 +312,16 @@ else
 fi
 
 note "joint 6: cancellation — 1 s client timeout against a 5 s Burn (sleep and spin)"
-SPID=$(start_jsrv jsrv6.log)
+SPID=$(start_jsrv jsrv6.log --verbose)
 track "$SPID"
 rc=0
 for variant in sleep spin; do
     crc=0
-    t "'$JCLI' --timeout 1000 slow 5000 $variant > '$QMP_TARGET_DIR/jcli6-$variant.log' 2>&1" || crc=$?
-    # The client must give up at ~1 s with ETIMEDOUT (exit 1, FAIL slow), NOT succeed
+    t "'$JCLI' --timeout 1000 --expect ETIMEDOUT slow 5000 $variant > '$QMP_TARGET_DIR/jcli6-$variant.log' 2>&1" || crc=$?
+    # The client must give up at ~1 s with ETIMEDOUT (PASS via --expect), NOT succeed
     # after 5 s; the server must log the unblock pulse and the early burn abort.
-    [ "$crc" -eq 1 ] || rc=1
-    t "grep -q '^FAIL slow' '$QMP_TARGET_DIR/jcli6-$variant.log'" || rc=$?
+    [ "$crc" -eq 0 ] || rc=1
+    t "grep -q '^PASS slow' '$QMP_TARGET_DIR/jcli6-$variant.log'" || rc=$?
     t "grep -Eq 'elapsed_ms=1[0-9]{3}([^0-9]|\$)' '$QMP_TARGET_DIR/jcli6-$variant.log'" || rc=$?
     wait_for 'burn canceled' jsrv6.log 10 || rc=$?
     t "cat '$QMP_TARGET_DIR/jcli6-$variant.log'" || true

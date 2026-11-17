@@ -33,6 +33,16 @@ cmake_dependent_option(QMP_TRANSPORT_UDS "Build the UDS bench-only transport" ON
 include(QmpWarnings)
 include(QmpCodegen)
 
+# Build identifier (git hash + dirty flag) regenerated on every build; the script only
+# rewrites the header when the id changes, so dependents rebuild exactly then.
+set(QMP_BUILD_ID_DIR "${CMAKE_BINARY_DIR}/gen/buildid")
+set(QMP_BUILD_ID_HEADER "${QMP_BUILD_ID_DIR}/qmp_build_id.h")
+add_custom_target(qmp_build_id
+  COMMAND ${CMAKE_COMMAND} -DOUT=${QMP_BUILD_ID_HEADER} -DSRC=${PROJECT_SOURCE_DIR}
+          -P ${PROJECT_SOURCE_DIR}/cmake/QmpBuildId.cmake
+  BYPRODUCTS ${QMP_BUILD_ID_HEADER}
+  COMMENT "Refreshing qmp_build_id.h")
+
 if(NOT QMP_SANITIZER STREQUAL "none")
   if(QMP_ON_QNX AND QMP_SANITIZER STREQUAL "tsan")
     message(FATAL_ERROR "tsan is not available on QNX; use the host build (ADR-004)")

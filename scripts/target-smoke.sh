@@ -245,11 +245,51 @@ if [ "$HAVE_ON" -eq 1 ] && [ "$HAVE_PIDIN" -eq 1 ]; then
     t "cat '$QMP_TARGET_DIR/jsrv5.log'" || true
     t "kill -9 $SPID $OPID 2>/dev/null || true"
     result joint-priority "$rc"
-    echo "SKIP: fixed-priority negative control — the runtime cannot create a"
-    echo "      fixed-priority channel today (qmp_joint_server --fixed-priority explains)."
+
+    note "joint 5b: fixed-priority negative control — same experiment, no inheritance"
+    OPID=$(t "on -p 10 '$JSRV' --verbose --fixed-priority > '$QMP_TARGET_DIR/jsrv5b.log' 2>&1 & echo \$!" | tr -d '\r')
+    track "$OPID"
+    sleep 1
+    SPID=$(t "sed -n 's/.*started pid=\([0-9]*\).*/\1/p' '$QMP_TARGET_DIR/jsrv5b.log'" | tr -d '\r')
+    SPID=${SPID:-$OPID}
+    track "$SPID"
+    CPID=$(t "on -p 30 '$JCLI' --timeout 0 slow 5000 spin > '$QMP_TARGET_DIR/jcli5b.log' 2>&1 & echo \$!" | tr -d '\r')
+    track "$CPID"
+    sleep 2
+    rc=0
+    echo "--- raw pidin, server (pid $SPID) DURING the spin call:"
+    echo "--- (with _NTO_CHF_FIXED_PRIORITY every worker should STAY at 10; V-QNX-041)"
+    t "pidin -p $SPID" || rc=$?
+    wait_for '^PASS slow' jcli5b.log 15 || rc=$?
+    t "cat '$QMP_TARGET_DIR/jcli5b.log'" || true
+    t "cat '$QMP_TARGET_DIR/jsrv5b.log'" || true
+    t "kill -9 $SPID $OPID 2>/dev/null || true"
+    result joint-fixed-priority "$rc"
 else
     echo "SKIP: joint-priority needs the 'on' and 'pidin' utilities on the target"
 fi
+
+note "joint 6: cancellation — 1 s client timeout against a 5 s Burn (sleep and spin)"
+SPID=$(start_jsrv jsrv6.log)
+track "$SPID"
+rc=0
+for variant in sleep spin; do
+    crc=0
+    t "'$JCLI' --timeout 1000 slow 5000 $variant > '$QMP_TARGET_DIR/jcli6-$variant.log' 2>&1" || crc=$?
+    # The client must give up at ~1 s with ETIMEDOUT (exit 1, FAIL slow), NOT succeed
+    # after 5 s; the server must log the unblock pulse and the early burn abort.
+    [ "$crc" -eq 1 ] || rc=1
+    t "grep -q '^FAIL slow' '$QMP_TARGET_DIR/jcli6-$variant.log'" || rc=$?
+    t "grep -Eq 'elapsed_ms=1[0-9]{3}([^0-9]|\$)' '$QMP_TARGET_DIR/jcli6-$variant.log'" || rc=$?
+    wait_for 'burn canceled' jsrv6.log 10 || rc=$?
+    t "cat '$QMP_TARGET_DIR/jcli6-$variant.log'" || true
+done
+if [ "$rc" -eq 0 ]; then
+    t "'$JCLI' once" || rc=$? # the server must still serve after the cancellations
+fi
+t "cat '$QMP_TARGET_DIR/jsrv6.log'" || true
+t "kill -9 $SPID 2>/dev/null || true"
+result joint-cancel "$rc"
 
 echo
 if [ "$fails" -eq 0 ]; then

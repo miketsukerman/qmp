@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "joint.qmp.h"
+#include "qmp_build_id.h"
 
 #define LOOP_MAX 1000000
 
@@ -36,16 +37,28 @@ static uint64_t now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-/* One line per event on stderr, prefixed with the monotonic clock in seconds. */
+/* One line per event on stderr, prefixed with the monotonic clock in seconds. The line is
+ * assembled in one buffer and written with a single write() so concurrent threads cannot
+ * interleave their output. */
 static void log_event(const char *fmt, ...) {
+    char buf[256];
     uint64_t t = now_ns();
-    fprintf(stderr, "[%" PRIu64 ".%06" PRIu64 "] joint_client: ", (uint64_t)(t / 1000000000ULL),
-            (uint64_t)((t % 1000000000ULL) / 1000ULL));
+    int n = snprintf(buf, sizeof(buf),
+                     "[%" PRIu64 ".%06" PRIu64 "] joint_client: ", (uint64_t)(t / 1000000000ULL),
+                     (uint64_t)((t % 1000000000ULL) / 1000ULL));
+    if (n < 0) {
+        return;
+    }
+    size_t off = (size_t)n < sizeof(buf) - 1 ? (size_t)n : sizeof(buf) - 1;
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    int m = vsnprintf(buf + off, sizeof(buf) - off, fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
+    if (m > 0) {
+        off += (size_t)m < sizeof(buf) - off ? (size_t)m : sizeof(buf) - 1 - off;
+    }
+    buf[off++] = '\n';
+    (void)write(STDERR_FILENO, buf, off);
 }
 #define LOGF log_event
 
@@ -132,7 +145,8 @@ static int mode_slow(qmp_client_t *c, long ms, const char *variant) {
     int rc = demo_joint_v1_Joint_Burn(c, &req, &rep, &status);
     uint64_t dt = now_ns() - t0;
     if (rc != EOK || status != 0) {
-        LOGF("slow: Burn failed rc=%d (%s) status=%" PRId32, rc, strerror(rc), status);
+        LOGF("slow: Burn failed rc=%d (%s) status=%" PRId32 " elapsed_ms=%" PRIu64, rc,
+             strerror(rc), status, dt / 1000000U);
         return 1;
     }
     printf("slow: done rc=0 elapsed_ms=%" PRIu64 " iterations=%" PRIu64 "\n", dt / 1000000U,
@@ -216,8 +230,8 @@ int main(int argc, char **argv) {
                 DEMO_JOINT_V1_JOINT_QNX_PATH, rc, strerror(rc));
         return 1;
     }
-    LOGF("connected pid=%d service=%s transport=%s generation=%" PRIu32 " timeout_ms=%ld",
-         (int)getpid(), DEMO_JOINT_V1_JOINT_SERVICE_NAME, tr->name,
+    LOGF("connected pid=%d build=%s service=%s transport=%s generation=%" PRIu32 " timeout_ms=%ld",
+         (int)getpid(), QMP_BUILD_ID, DEMO_JOINT_V1_JOINT_SERVICE_NAME, tr->name,
          qmp_client_server_generation(&c), timeout_ms);
 
     if (strcmp(mode, "once") == 0) {

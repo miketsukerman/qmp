@@ -15,14 +15,15 @@
  *   --verbose          log each call and reply (off by default: no fast-path logging)
  *   --fake             allow the in-process fake transport (host); otherwise the server
  *                      refuses to start when the default transport is not "qnx"
- *   --fixed-priority   requested negative control for priority inheritance. NOT
- *                      SUPPORTED: the qmp QNX transport always creates the channel with
- *                      priority inheritance (never _NTO_CHF_FIXED_PRIORITY) and exposes
- *                      no channel-flags knob. The server reports this and exits 2.
+ *   --fixed-priority   negative control for priority inheritance: the channel is created
+ *                      with _NTO_CHF_FIXED_PRIORITY (QMP_LISTEN_FIXED_PRIORITY), so
+ *                      handler threads keep their own priority instead of inheriting the
+ *                      caller's (V-QNX-041). Never use this outside the experiment.
  *   --selftest         host only: run an in-process client once and exit (ctest)
  *
  * Handlers run on a libqmp worker at the caller's inherited priority; per-call logging is
- * only enabled with --verbose and uses one fprintf per event.
+ * only enabled with --verbose. Each log line is written with a single write() so lines
+ * from different threads cannot interleave.
  */
 #include <inttypes.h>
 #include <pthread.h>
@@ -36,8 +37,10 @@
 #include <unistd.h>
 
 #include "joint.qmp.h"
+#include "qmp_build_id.h"
 
-#define MAX_BURN_MS 600000 /* cap Burn at 10 minutes */
+#define MAX_BURN_MS  600000 /* cap Burn at 10 minutes                                   */
+#define BURN_POLL_MS 50     /* how often a running Burn polls qmp_req_canceled()        */
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -45,16 +48,28 @@ static uint64_t now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-/* One line per event on stderr, prefixed with the monotonic clock in seconds. */
+/* One line per event on stderr, prefixed with the monotonic clock in seconds. The line is
+ * assembled in one buffer and written with a single write() so concurrent threads cannot
+ * interleave their output. */
 static void log_event(const char *fmt, ...) {
+    char buf[256];
     uint64_t t = now_ns();
-    fprintf(stderr, "[%" PRIu64 ".%06" PRIu64 "] joint_server: ", (uint64_t)(t / 1000000000ULL),
-            (uint64_t)((t % 1000000000ULL) / 1000ULL));
+    int n = snprintf(buf, sizeof(buf),
+                     "[%" PRIu64 ".%06" PRIu64 "] joint_server: ", (uint64_t)(t / 1000000000ULL),
+                     (uint64_t)((t % 1000000000ULL) / 1000ULL));
+    if (n < 0) {
+        return;
+    }
+    size_t off = (size_t)n < sizeof(buf) - 1 ? (size_t)n : sizeof(buf) - 1;
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    int m = vsnprintf(buf + off, sizeof(buf) - off, fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
+    if (m > 0) {
+        off += (size_t)m < sizeof(buf) - off ? (size_t)m : sizeof(buf) - 1 - off;
+    }
+    buf[off++] = '\n';
+    (void)write(STDERR_FILENO, buf, off);
 }
 #define LOGF log_event
 
@@ -136,19 +151,50 @@ static int on_burn(void *ctx, qmp_req_t *req, const demo_joint_v1_BurnRequest *i
         return QMP_HANDLED;
     }
     uint64_t iterations = 0;
+    int canceled = 0;
+    const uint64_t t0 = now_ns();
+    const uint64_t deadline = t0 + (uint64_t)in->duration_ms * 1000000ULL;
     if (in->spin) {
-        /* Busy-burn the CPU: this is what makes priority inheritance observable. */
-        const uint64_t deadline = now_ns() + (uint64_t)in->duration_ms * 1000000ULL;
+        /* Busy-burn the CPU: this is what makes priority inheritance observable. Poll
+         * qmp_req_canceled() about every BURN_POLL_MS so a client timeout, signal or
+         * disconnect aborts the burn instead of wasting the rest of the budget. */
         volatile uint32_t sink = 0;
+        uint64_t next_poll = t0 + (uint64_t)BURN_POLL_MS * 1000000ULL;
         while (now_ns() < deadline) {
             for (int i = 0; i < 10000; i++) {
                 sink += (uint32_t)i;
             }
             iterations++;
+            if (now_ns() >= next_poll) {
+                if (qmp_req_canceled(req)) {
+                    canceled = 1;
+                    break;
+                }
+                next_poll += (uint64_t)BURN_POLL_MS * 1000000ULL;
+            }
         }
     } else {
-        struct timespec ts = {in->duration_ms / 1000, (long)(in->duration_ms % 1000) * 1000000L};
-        (void)nanosleep(&ts, NULL);
+        /* Sleep in BURN_POLL_MS chunks so cancellation is noticed at the same rate. */
+        while (now_ns() < deadline) {
+            uint64_t left_ns = deadline - now_ns();
+            uint64_t chunk_ns = (uint64_t)BURN_POLL_MS * 1000000ULL;
+            if (chunk_ns > left_ns) {
+                chunk_ns = left_ns;
+            }
+            struct timespec ts = {(time_t)(chunk_ns / 1000000000ULL),
+                                  (long)(chunk_ns % 1000000000ULL)};
+            (void)nanosleep(&ts, NULL);
+            if (qmp_req_canceled(req)) {
+                canceled = 1;
+                break;
+            }
+        }
+    }
+    if (canceled) {
+        /* The runtime already cancelled the rcvid; our result is discarded, no reply. */
+        LOGF("burn canceled after %" PRIu64 " of %" PRIu32 " ms spin=%u iterations=%" PRIu64,
+             (now_ns() - t0) / 1000000ULL, in->duration_ms, (unsigned)in->spin, iterations);
+        return QMP_HANDLED;
     }
     out->iterations = iterations;
     *status = 0;
@@ -234,6 +280,7 @@ int main(int argc, char **argv) {
     int verbose = 0;
     int use_fake = 0;
     int selftest = 0;
+    int fixed_priority = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             nthreads = atoi(argv[++i]);
@@ -245,12 +292,7 @@ int main(int argc, char **argv) {
             selftest = 1;
             use_fake = 1; /* the host default transport is the fake */
         } else if (strcmp(argv[i], "--fixed-priority") == 0) {
-            fprintf(stderr,
-                    "joint_server: --fixed-priority is not supported: the qmp QNX transport\n"
-                    "always creates the channel with priority inheritance (never\n"
-                    "_NTO_CHF_FIXED_PRIORITY) and has no channel-flags option. A runtime\n"
-                    "change is required for this negative control.\n");
-            return 2;
+            fixed_priority = 1;
         } else {
             return usage(argv[0]);
         }
@@ -286,6 +328,8 @@ int main(int argc, char **argv) {
     qmp_server_t server;
     qmp_server_cfg_t cfg = {.transport = tr,
                             .nthreads = nthreads,
+                            .listen_flags = fixed_priority ? QMP_LISTEN_FIXED_PRIORITY : 0,
+                            .verbose = verbose,
                             .workbuf = g_workbuf,
                             .workbuf_size = sizeof(g_workbuf),
                             .on_client_gone = on_client_gone};
@@ -305,9 +349,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    LOGF("started pid=%d service=%s path=%s transport=%s threads=%d generation=%" PRIu32,
-         (int)getpid(), DEMO_JOINT_V1_JOINT_SERVICE_NAME, DEMO_JOINT_V1_JOINT_QNX_PATH, tr->name,
-         nthreads, qmp_server_generation(&server));
+    LOGF("started pid=%d build=%s service=%s path=%s transport=%s threads=%d fixed_priority=%d "
+         "generation=%" PRIu32,
+         (int)getpid(), QMP_BUILD_ID, DEMO_JOINT_V1_JOINT_SERVICE_NAME,
+         DEMO_JOINT_V1_JOINT_QNX_PATH, tr->name, nthreads, fixed_priority,
+         qmp_server_generation(&server));
 
     int result = 0;
 #if !defined(__QNX__)

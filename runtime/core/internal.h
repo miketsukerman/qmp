@@ -18,6 +18,21 @@ extern "C" {
 #endif
 
 /* ---- client ------------------------------------------------------------- */
+typedef struct qmp_sub_impl {
+    struct qmp_client_impl *owner; /* NULL = inactive slot                       */
+    void *buf;                     /* caller's sample buffer                     */
+    size_t buf_cap;
+    qmp_sub_cb_t cb;
+    void *cb_ctx;
+    uint64_t last_seq; /* pull cursor: newest sequence consumed      */
+    uint32_t sub_id;   /* server-side id for UNSUBSCRIBE             */
+    uint16_t topic_id;
+    uint16_t event_len;
+    uint8_t event[QMP_EVENT_BLOB_MAX]; /* registered blob, for event_unregister */
+} qmp_sub_impl_t;
+QMP_STATIC_ASSERT(sizeof(qmp_sub_impl_t) <= sizeof(qmp_sub_t), "qmp_sub_t too small");
+QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_sub_impl_t) <= QMP_ALIGNOF(qmp_sub_t), "qmp_sub_t align");
+
 typedef struct qmp_client_impl {
     const qmp_transport_t *tr;
     uint64_t default_timeout_ns;
@@ -31,10 +46,13 @@ typedef struct qmp_client_impl {
     uint32_t server_generation;
     uint32_t server_max_msg_size;
     uint8_t have_params; /* connect() ran once: reconnect() may reuse the identity */
-    uint8_t _pad0[3];
+    uint8_t notify_open; /* private notification channel exists                    */
+    uint8_t _pad0[2];
     uint32_t reconnect_initial_ms;
     uint32_t reconnect_max_ms;
     uint32_t reconnect_attempts;
+    uint32_t _pad1;
+    qmp_sub_impl_t *subs[QMP_CLIENT_MAX_SUBS]; /* caller-provided qmp_sub_t storage */
 } qmp_client_impl_t;
 QMP_STATIC_ASSERT(sizeof(qmp_client_impl_t) <= sizeof(qmp_client_t), "qmp_client_t too small");
 QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_client_impl_t) <= QMP_ALIGNOF(qmp_client_t),
@@ -81,6 +99,31 @@ QMP_STATIC_ASSERT(sizeof(qmp_req_impl_t) <= sizeof(qmp_req_t), "qmp_req_t too sm
 QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_req_impl_t) <= QMP_ALIGNOF(qmp_req_t), "qmp_req_t align");
 
 /* ---- server ------------------------------------------------------------- */
+/* One subscription (ADR-003). Lives in the caller-provided topicbuf; guarded by
+ * topic_mu. rcvid is the SUBSCRIBE message's receive id, kept after the reply for
+ * MsgDeliverEvent (V-QNX-043). */
+typedef struct qmp_sub_entry {
+    int64_t rcvid;
+    int32_t scoid;
+    int32_t pid;
+    uint32_t sub_id; /* 0 = free slot */
+    uint16_t topic_idx;
+    uint16_t event_len;
+    uint8_t event[QMP_EVENT_BLOB_MAX];
+} qmp_sub_entry_t;
+QMP_STATIC_ASSERT(sizeof(qmp_sub_entry_t) <= QMP_SUB_ENTRY_SIZE, "sub entry size");
+
+/* Per-topic ring header at the start of each topic block in topicbuf. Slots follow:
+ * nslots x slot_stride bytes, each slot = u64 seq + padded sample. next_seq - 1 is the
+ * newest published sequence; slot index for seq is (seq - 1) % nslots. */
+typedef struct qmp_topic_state {
+    uint64_t next_seq; /* starts at 1                               */
+    uint32_t nslots;
+    uint32_t slot_stride;
+    uint8_t *slots;
+} qmp_topic_state_t;
+QMP_STATIC_ASSERT(sizeof(qmp_topic_state_t) <= QMP_TOPIC_HEADER_SIZE, "topic header size");
+
 typedef struct qmp_server_impl {
     const qmp_transport_t *tr;
     qmp_endpoint_t ep;
@@ -113,6 +156,15 @@ typedef struct qmp_server_impl {
     int (*acl_check)(void *ctx, const qmp_cred_t *cred, uint16_t resource_id);
     void (*on_cancel)(void *ctx, qmp_req_t *req);
     void (*on_client_gone)(void *ctx, int32_t pid);
+    /* Topic state (caller storage, laid out in qmp_server_register). topic_mu guards the
+     * subscription table and the rings; it is never held across deliver() or a reply. */
+    pthread_mutex_t topic_mu;
+    qmp_sub_entry_t *subs;      /* QMP_SERVER_MAX_SUBS entries, NULL = no topics */
+    qmp_topic_state_t *tstates; /* desc->ntopics ring headers (contiguous array) */
+    uint8_t *topicbuf;          /* cfg storage, laid out in qmp_server_register  */
+    size_t topicbuf_size;
+    uint32_t sub_id_seq; /* monotonically increasing, never handed out 0  */
+    uint32_t _pad1;
 } qmp_server_impl_t;
 QMP_STATIC_ASSERT(sizeof(qmp_server_impl_t) <= sizeof(qmp_server_t), "qmp_server_t too small");
 QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_server_impl_t) <= QMP_ALIGNOF(qmp_server_t),
@@ -134,6 +186,24 @@ int qmp_dispatch_lookup(const qmp_service_desc_t *desc, uint16_t instance_id, co
 /* Lifecycle events from the transport (worker thread). */
 void qmp_server_on_unblock(qmp_server_impl_t *s, int64_t rcvid);
 void qmp_server_on_disconnect(qmp_server_impl_t *s, int32_t scoid, int32_t pid);
+
+/* ---- topics (runtime/core/topics.c) -------------------------------------- */
+/* Lay out subs table + ring headers + slots inside s->topicbuf. EMSGSIZE when the buffer
+ * is too small, EINVAL on a malformed topic table. Called from qmp_server_register. */
+int qmp_topics_init(qmp_server_impl_t *s);
+/* Returns EOK and *idx, or ENOENT. */
+int qmp_topic_find(const qmp_server_impl_t *s, uint16_t topic_id, uint32_t *idx);
+/* Add a subscription; fills *rep. EAGAIN when the table is full. */
+int qmp_topic_sub_add(qmp_server_impl_t *s, uint32_t idx, const qmp_rcv_info_t *info,
+                      const qmp_subscribe_t *req, qmp_subscribe_reply_t *rep);
+/* Remove by sub_id; the scoid must match the subscriber's (ownership). ENOENT if gone. */
+int qmp_topic_sub_remove(qmp_server_impl_t *s, uint32_t sub_id, int32_t scoid);
+/* Copy the next sample after after_seq into sample_out (cap >= sample_size) and fill
+ * *rep (count == 0 when there is nothing new). */
+int qmp_topic_pull(qmp_server_impl_t *s, uint32_t idx, uint64_t after_seq, qmp_pull_reply_t *rep,
+                   void *sample_out);
+/* Drop every subscription owned by a disconnected client process. */
+void qmp_topic_drop_scoid(qmp_server_impl_t *s, int32_t scoid);
 
 #ifdef __cplusplus
 }

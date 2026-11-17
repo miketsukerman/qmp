@@ -17,9 +17,23 @@
 extern "C" {
 #endif
 
-#define QMP_SERVER_STORAGE_U64 72
+#define QMP_SERVER_STORAGE_U64 88
 #define QMP_REQ_STORAGE_U64    10
 #define QMP_SERVER_MAX_THREADS 8
+
+/* Topic storage bounds (ADR-003). Subscriptions across all topics share one fixed table;
+ * a full table fails SUBSCRIBE with EAGAIN (bounded by design, never grown). */
+#define QMP_SERVER_MAX_SUBS 16
+#define QMP_SUB_ENTRY_SIZE  96U
+/* Per-topic block: a fixed header + nslots ring slots of (u64 seq + padded sample).
+ * LATEST topics use nslots == 1, QUEUE topics nslots == depth. Generated headers compose
+ * these into a per-service <MACRO>_TOPIC_STORAGE_SIZE. */
+#define QMP_TOPIC_ALIGN8(n)         (((size_t)(n) + 7U) & ~(size_t)7U)
+#define QMP_TOPIC_SLOT_SIZE(sample) (8U + QMP_TOPIC_ALIGN8(sample))
+#define QMP_TOPIC_HEADER_SIZE       64U
+#define QMP_TOPIC_STATE_SIZE(sample, nslots)                                                       \
+    (QMP_TOPIC_HEADER_SIZE + (size_t)(nslots) * QMP_TOPIC_SLOT_SIZE(sample))
+#define QMP_SERVER_SUBTABLE_SIZE ((size_t)QMP_SERVER_MAX_SUBS * QMP_SUB_ENTRY_SIZE)
 
 typedef struct qmp_server {
     uint64_t _storage[QMP_SERVER_STORAGE_U64];
@@ -71,6 +85,16 @@ typedef struct qmp_method_desc {
     const char *name;
 } qmp_method_desc_t;
 
+typedef struct qmp_topic_desc {
+    uint16_t id;    /* resource id 0x8000..0xFFFF             */
+    uint16_t mode;  /* enum qmp_topic_mode                    */
+    uint16_t depth; /* ring depth for QUEUE, ignored for LATEST */
+    uint16_t _pad0;
+    uint32_t sample_size;
+    uint32_t _pad1;
+    const char *name;
+} qmp_topic_desc_t;
+
 typedef struct qmp_service_desc {
     uint16_t service_id;
     uint8_t ver_major;
@@ -79,6 +103,8 @@ typedef struct qmp_service_desc {
     const char *name;                 /* uprotocol.service_name                     */
     const qmp_method_desc_t *methods; /* sorted by id                    */
     size_t nmethods;
+    const qmp_topic_desc_t *topics; /* sorted by id; NULL when ntopics == 0 */
+    size_t ntopics;
 } qmp_service_desc_t;
 
 typedef struct qmp_server_cfg {
@@ -117,6 +143,13 @@ typedef struct qmp_server_cfg {
     /* A client process closed its last connection (QNX disconnect pulse). The runtime
      * has already dropped its parked requests (each with on_cancel). Worker thread. */
     void (*on_client_gone)(void *ctx, int32_t pid);
+
+    /* Topic storage: caller-provided, 8-byte aligned, QMP_SERVER_SUBTABLE_SIZE plus the
+     * sum of QMP_TOPIC_STATE_SIZE() over the topics — generated code emits the exact
+     * <MACRO>_TOPIC_STORAGE_SIZE. Owned by the server until qmp_server_close(). NULL
+     * disables topics: SUBSCRIBE and qmp_server_publish() return ENOTSUP. */
+    void *topicbuf;
+    size_t topicbuf_size;
 } qmp_server_cfg_t;
 
 #define QMP_SERVER_WORKBUF_SIZE(max_msg_size, nthreads)                                            \
@@ -140,6 +173,14 @@ int qmp_server_stop(qmp_server_t *s);
 int qmp_server_close(qmp_server_t *s);
 
 uint32_t qmp_server_generation(const qmp_server_t *s);
+
+/* Publish one sample on a declared topic (ADR-003). Records the sample under the next
+ * sequence number, then notifies every subscriber with a non-blocking event delivery; a
+ * dead or unreachable subscriber is dropped from the table, the others are unaffected.
+ * No heap, no logging, no lock held across the kernel delivery call. len must equal the
+ * topic's sample size. Any thread (also from inside handlers). Returns EOK, ENOENT
+ * (unknown topic id), EINVAL (bad len), ENOTSUP (no topic storage configured). */
+int qmp_server_publish(qmp_server_t *s, uint16_t topic_id, const void *sample, size_t len);
 
 /* Inside a handler: information about the caller. */
 int qmp_req_get_info(const qmp_req_t *req, qmp_req_info_t *info);

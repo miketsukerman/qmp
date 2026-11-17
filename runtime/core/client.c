@@ -135,6 +135,106 @@ static int mark_dead_on(int rc, qmp_client_impl_t *ci) {
     return rc;
 }
 
+/* ---- topics (ADR-003 notify-then-pull) ------------------------------------ */
+
+/* Control round trip (QMP_F_CONTROL). Expects status 0 and exactly rep_cap bytes. */
+static int control_call(qmp_client_impl_t *ci, uint16_t op, const void *req, size_t req_len,
+                        void *rep, size_t rep_cap) {
+    qmp_hdr_t req_hdr;
+    qmp_hdr_t rep_hdr;
+    qmp_hdr_init(&req_hdr, ci->service_id, ci->instance_id, op, ci->ver_major, ci->ver_minor,
+                 QMP_F_CONTROL, (uint32_t)req_len);
+    int rc = do_call(ci, &req_hdr, req, req_len, &rep_hdr, rep, rep_cap, ci->default_timeout_ns);
+    if (rc != EOK) {
+        return rc;
+    }
+    return (rep_hdr.status == 0 && rep_hdr.payload_len == rep_cap) ? EOK : EPROTO;
+}
+
+/* Register a fresh event with the connected server and SUBSCRIBE with it. Fills the
+ * sub's event blob, sub_id and cursor. */
+static int resubscribe(qmp_client_impl_t *ci, qmp_sub_impl_t *sub) {
+    qmp_subscribe_t req;
+    memset(&req, 0, sizeof(req));
+    req.topic_id = sub->topic_id;
+    size_t blob_len = 0;
+    int rc = ci->tr->event_register(&ci->conn, req.event, sizeof(req.event), &blob_len);
+    if (rc != EOK) {
+        return rc;
+    }
+    req.event_len = (uint16_t)blob_len;
+    qmp_subscribe_reply_t rep;
+    rc = control_call(ci, QMP_OP_SUBSCRIBE, &req, sizeof(req), &rep, sizeof(rep));
+    if (rc != EOK) {
+        (void)ci->tr->event_unregister(&ci->conn, req.event, blob_len);
+        return rc;
+    }
+    memcpy(sub->event, req.event, sizeof(sub->event));
+    sub->event_len = req.event_len;
+    sub->sub_id = rep.sub_id;
+    sub->last_seq = rep.seq; /* only NEW updates are delivered */
+    return EOK;
+}
+
+/* Pull once: header + qmp_pull_reply_t + sample land in three iov parts. Returns EOK
+ * with *pr filled (count == 0 means drained) and *sample_len set for count == 1. */
+static int pull_once(qmp_client_impl_t *ci, qmp_sub_impl_t *sub, qmp_pull_reply_t *pr,
+                     uint32_t *sample_len) {
+    qmp_pull_t req;
+    memset(&req, 0, sizeof(req));
+    req.topic_id = sub->topic_id;
+    req.after_seq = sub->last_seq;
+    qmp_hdr_t req_hdr;
+    qmp_hdr_t rep_hdr;
+    qmp_hdr_init(&req_hdr, ci->service_id, ci->instance_id, QMP_OP_PULL, ci->ver_major,
+                 ci->ver_minor, QMP_F_CONTROL, (uint32_t)sizeof(req));
+    qmp_iov_t siov[2] = {{&req_hdr, QMP_HDR_SIZE}, {&req, sizeof(req)}};
+    qmp_iov_t riov[3] = {{&rep_hdr, QMP_HDR_SIZE}, {pr, sizeof(*pr)}, {sub->buf, sub->buf_cap}};
+    size_t reply_len = 0;
+    memset(&rep_hdr, 0, sizeof(rep_hdr));
+    memset(pr, 0, sizeof(*pr));
+    *sample_len = 0;
+    int rc = ci->tr->call(&ci->conn, siov, 2, riov, 3, ci->default_timeout_ns, &reply_len);
+    if (rc != EOK) {
+        return rc;
+    }
+    if (reply_len == 0) {
+        reply_len = QMP_HDR_SIZE + (size_t)rep_hdr.payload_len;
+    }
+    rc = qmp_hdr_validate_reply(&rep_hdr, &req_hdr, reply_len, sizeof(*pr) + sub->buf_cap);
+    if (rc != EOK) {
+        return rc;
+    }
+    if (rep_hdr.status != 0 || rep_hdr.payload_len < sizeof(*pr) || pr->count > 1 ||
+        (pr->count == 0 && rep_hdr.payload_len != sizeof(*pr))) {
+        return EPROTO;
+    }
+    *sample_len = rep_hdr.payload_len - (uint32_t)sizeof(*pr);
+    return EOK;
+}
+
+/* Pull a subscription dry, running the callback per sample in sequence order. */
+static int drain_sub(qmp_client_impl_t *ci, qmp_sub_impl_t *sub) {
+    for (;;) {
+        qmp_pull_reply_t pr;
+        uint32_t slen = 0;
+        int rc = pull_once(ci, sub, &pr, &slen);
+        if (rc != EOK) {
+            return rc;
+        }
+        if (pr.count == 0) {
+            return EOK;
+        }
+        sub->last_seq = pr.seq;
+        if (sub->cb != NULL) {
+            sub->cb(sub->cb_ctx, sub->buf, slen, pr.seq, pr.dropped);
+        }
+        if (pr.remaining == 0) {
+            return EOK;
+        }
+    }
+}
+
 int qmp_client_reconnect(qmp_client_t *c) {
     if (c == NULL) {
         return EINVAL;
@@ -157,6 +257,25 @@ int qmp_client_reconnect(qmp_client_t *c) {
         rc = connect_once(ci);
         if (rc == EOK || rc == ENOTSUP) {
             break; /* connected, or a major-version mismatch retries can't fix */
+        }
+    }
+    if (rc != EOK) {
+        return rc;
+    }
+    /* Resubscribe active subscriptions on the new session. Old subscription ids and
+     * event registrations died with the old connection: register fresh events (the
+     * registration is bound to the old server coid) and send new SUBSCRIBEs. Sequence
+     * numbers restart with the server; each cursor resets to the new current value. */
+    for (unsigned i = 0; i < QMP_CLIENT_MAX_SUBS; i++) {
+        qmp_sub_impl_t *sub = ci->subs[i];
+        if (sub == NULL) {
+            continue;
+        }
+        int src = resubscribe(ci, sub);
+        if (src != EOK) {
+            sub->owner = NULL; /* dropped; the connection itself stays usable */
+            ci->subs[i] = NULL;
+            rc = src;
         }
     }
     return rc;
@@ -228,12 +347,138 @@ int qmp_client_oneway(qmp_client_t *c, uint16_t resource_id, const void *req, si
     return (rep_hdr.status == 0 && rep_hdr.payload_len == 0) ? EOK : EPROTO;
 }
 
+int qmp_client_subscribe(qmp_client_t *c, uint16_t topic_id, void *sample_buf, size_t sample_cap,
+                         qmp_sub_cb_t cb, void *ctx, qmp_sub_t *sub_) {
+    if (c == NULL || sub_ == NULL || sample_buf == NULL || sample_cap == 0 ||
+        ((uintptr_t)sample_buf & 7U) != 0) {
+        return EINVAL;
+    }
+    qmp_client_impl_t *ci = impl(c);
+    if (!ci->connected) {
+        return ENOTCONN;
+    }
+    if (ci->tr->notify_open == NULL || ci->tr->event_register == NULL) {
+        return ENOSYS; /* transport has no notification support */
+    }
+    int slot = -1;
+    for (unsigned i = 0; i < QMP_CLIENT_MAX_SUBS; i++) {
+        if (ci->subs[i] == NULL) {
+            slot = (int)i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return EAGAIN; /* bounded by design */
+    }
+    if (!ci->notify_open) {
+        int rc = ci->tr->notify_open(&ci->conn);
+        if (rc != EOK) {
+            return rc;
+        }
+        ci->notify_open = 1;
+    }
+    qmp_sub_impl_t *sub = (qmp_sub_impl_t *)(void *)sub_;
+    memset(sub, 0, sizeof(*sub));
+    sub->buf = sample_buf;
+    sub->buf_cap = sample_cap;
+    sub->cb = cb;
+    sub->cb_ctx = ctx;
+    sub->topic_id = topic_id;
+    int rc = resubscribe(ci, sub);
+    if (rc != EOK) {
+        return mark_dead_on(rc, ci);
+    }
+    sub->owner = ci;
+    ci->subs[slot] = sub;
+    return EOK;
+}
+
+int qmp_client_unsubscribe(qmp_client_t *c, qmp_sub_t *sub_) {
+    if (c == NULL || sub_ == NULL) {
+        return EINVAL;
+    }
+    qmp_client_impl_t *ci = impl(c);
+    qmp_sub_impl_t *sub = (qmp_sub_impl_t *)(void *)sub_;
+    if (sub->owner != ci) {
+        return EOK; /* inactive (or already dropped by a failed resubscribe) */
+    }
+    int rc = EOK;
+    if (ci->connected) {
+        qmp_unsubscribe_t req;
+        memset(&req, 0, sizeof(req));
+        req.sub_id = sub->sub_id;
+        rc = control_call(ci, QMP_OP_UNSUBSCRIBE, &req, sizeof(req), NULL, 0);
+        if (rc != EOK) {
+            rc = mark_dead_on(rc, ci);
+        }
+        if (ci->connected && ci->tr->event_unregister != NULL) {
+            (void)ci->tr->event_unregister(&ci->conn, sub->event, sub->event_len);
+        }
+    }
+    /* Local state is always released: a dead server cleans up on disconnect. */
+    sub->owner = NULL;
+    for (unsigned i = 0; i < QMP_CLIENT_MAX_SUBS; i++) {
+        if (ci->subs[i] == sub) {
+            ci->subs[i] = NULL;
+        }
+    }
+    return rc == ESRCH ? EOK : rc;
+}
+
+int qmp_client_poll(qmp_client_t *c, uint64_t timeout_ns) {
+    if (c == NULL) {
+        return EINVAL;
+    }
+    qmp_client_impl_t *ci = impl(c);
+    if (!ci->connected) {
+        return ENOTCONN;
+    }
+    if (!ci->notify_open) {
+        return EINVAL; /* no active subscription */
+    }
+    bool any = false;
+    for (unsigned i = 0; i < QMP_CLIENT_MAX_SUBS; i++) {
+        any = any || ci->subs[i] != NULL;
+    }
+    if (!any) {
+        return EINVAL; /* everything was unsubscribed */
+    }
+    int64_t value = 0;
+    int rc = ci->tr->notify_wait(&ci->conn, timeout_ns, &value);
+    if (rc != EOK) {
+        return mark_dead_on(rc, ci);
+    }
+    /* The pulse (and its value) is only a hint: pulses can be coalesced or fail to queue
+     * (V-QNX-044). Drain every subscription; the cursor is the source of truth. */
+    for (unsigned i = 0; i < QMP_CLIENT_MAX_SUBS; i++) {
+        if (ci->subs[i] != NULL) {
+            rc = drain_sub(ci, ci->subs[i]);
+            if (rc != EOK) {
+                return mark_dead_on(rc, ci);
+            }
+        }
+    }
+    return EOK;
+}
+
 int qmp_client_close(qmp_client_t *c) {
     if (c == NULL) {
         return EINVAL;
     }
     qmp_client_impl_t *ci = impl(c);
     int rc = EOK;
+    for (unsigned i = 0; i < QMP_CLIENT_MAX_SUBS; i++) {
+        if (ci->subs[i] != NULL) {
+            ci->subs[i]->owner = NULL;
+            ci->subs[i] = NULL;
+        }
+    }
+    if (ci->notify_open) {
+        if (ci->tr->notify_close != NULL) {
+            (void)ci->tr->notify_close(&ci->conn);
+        }
+        ci->notify_open = 0;
+    }
     if (ci->connected) {
         rc = ci->tr->disconnect(&ci->conn);
         ci->connected = 0;

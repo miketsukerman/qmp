@@ -17,7 +17,7 @@
       "permission_level": null,
       "uuri": "/101/1",
       "qnx_path": "qmp/0101-0000/v1",
-      "max_msg_size": 72,
+      "max_msg_size": 96,
       "methods": [
         {
           "name": "SetTarget",
@@ -77,6 +77,16 @@
           "size": 48,
           "mode": "LATEST",
           "depth": 0,
+          "notification": false
+        },
+        {
+          "name": "StateLog",
+          "id": 32770,
+          "uuri": "/101/1/8002",
+          "message": "demo.joint.v1.JointState",
+          "size": 48,
+          "mode": "QUEUE",
+          "depth": 8,
           "notification": false
         }
       ]

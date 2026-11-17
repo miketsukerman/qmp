@@ -55,6 +55,18 @@ service Joint {
     topic_id : 0x8001
     mode : MODE_LATEST
   };
+  // Same sample stream, but lossless up to a bounded backlog: a slow subscriber sees
+  // every update until the queue overflows, and then an explicit dropped count.
+  option (uprotocol.publish_topic) = {
+    id : 0x8002
+    name : "StateLog"
+    message : "JointState"
+  };
+  option (qmp.topic_mode) = {
+    topic_id : 0x8002
+    mode : MODE_QUEUE
+    depth : 8
+  };
 
   rpc SetTarget(SetTargetRequest) returns (SetTargetReply) {
     option (uprotocol.method_id) = 0x0001;

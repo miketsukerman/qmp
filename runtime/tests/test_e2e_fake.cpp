@@ -249,8 +249,8 @@ TEST_F(E2E, OutOfRangeStringOnTheWireIsERANGE) {
     static const qmp_method_desc_t methods[] = {
         {1, 0, sizeof(demo_joint_v1_JointState), sizeof(demo_joint_v1_SetTargetReply), 0,
          demo_joint_v1_JointState_validate, tramp, "TakeState"}};
-    static const qmp_service_desc_t desc = {0x0202,         1,       0, QMP_HDR_SIZE + 48,
-                                            "test.Bounded", methods, 1};
+    static const qmp_service_desc_t desc = {
+        0x0202, 1, 0, QMP_HDR_SIZE + 48, "test.Bounded", methods, 1, NULL, 0};
     alignas(8) unsigned char wb[QMP_SERVER_WORKBUF_SIZE(72, 1)];
     qmp_server_t s2;
     qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), 1, wb, sizeof(wb));
@@ -368,7 +368,7 @@ TEST(E2ENoServer, ConnectToMissingServiceIsENOENT) {
 
 TEST(E2ENoServer, TimeoutWhenNobodyReceives) {
     /* Listen but never run the loop: the fake has the request PENDING forever. */
-    alignas(8) unsigned char wb[QMP_SERVER_WORKBUF_SIZE(72, 1)];
+    alignas(8) unsigned char wb[QMP_SERVER_WORKBUF_SIZE(DEMO_JOINT_V1_JOINT_MAX_MSG_SIZE, 1)];
     qmp_server_t s;
     qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), 1, wb, sizeof(wb));
     demo_joint_v1_Joint_ops ops{};

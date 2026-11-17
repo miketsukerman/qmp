@@ -11,7 +11,14 @@ from typing import Any
 import jinja2
 
 from protoc_gen_qmp import __version__
-from protoc_gen_qmp.layout import HDR_SIZE, LayoutTable, Struct, decl_of
+from protoc_gen_qmp.layout import (
+    HDR_SIZE,
+    PULL_REPLY_SIZE,
+    SUBSCRIBE_SIZE,
+    LayoutTable,
+    Struct,
+    decl_of,
+)
 from protoc_gen_qmp.model import FileModel, Kind, Message, Service, Universe, c_ident
 from protoc_gen_qmp.validate import reachable_messages
 
@@ -240,6 +247,8 @@ def _service_ctx(
                 "c_type": table.structs[t.resolved_message].c_name,
                 "size": size_of(t.resolved_message),
                 "mode": t.mode,
+                "mode_enum": "QMP_TOPIC_QUEUE" if t.mode == "QUEUE" else "QMP_TOPIC_LATEST",
+                "nslots": t.depth if t.mode == "QUEUE" else 1,
                 "depth": t.depth,
                 "notification": t.notification,
             }
@@ -247,7 +256,11 @@ def _service_ctx(
     sizes: list[int] = [0]
     sizes += [int(m["in_size"]) for m in methods]
     sizes += [int(m["out_size"]) for m in methods]
-    sizes += [int(t["size"]) for t in topics]
+    if topics:
+        # Topic control plane: SUBSCRIBE request (qmp_subscribe_t) and FETCH replies
+        # (qmp_pull_reply_t header + one sample). Keep in sync with include/qmp/qmp.h.
+        sizes.append(SUBSCRIBE_SIZE)
+        sizes += [int(t["size"]) + PULL_REPLY_SIZE for t in topics]
     max_payload = max(sizes)
     return {
         "name": svc.name,

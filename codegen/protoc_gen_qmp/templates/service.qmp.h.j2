@@ -39,6 +39,11 @@ extern "C" {
 #define {{ svc.macro }}_MAX_PAYLOAD  {{ svc.max_payload }}U
 /* header + largest payload: size the server work buffer with this */
 #define {{ svc.macro }}_MAX_MSG_SIZE ({{ hdr_size }}U + {{ svc.max_payload }}U)
+{% if svc.topics %}
+/* qmp_server_cfg_t.topicbuf size (8-byte aligned storage) for this service's topics. */
+#define {{ svc.macro }}_TOPIC_STORAGE_SIZE \
+    (QMP_SERVER_SUBTABLE_SIZE{% for t in svc.topics %} + QMP_TOPIC_STATE_SIZE({{ t.size }}U, {{ t.nslots }}U){% endfor %})
+{% endif %}
 
 /* ---- payload structs (field-number order, explicit padding) ------------ */
 {% for g in svc.struct_groups %}
@@ -96,8 +101,25 @@ int {{ svc.prefix }}_{{ m.name }}_ex({{ m.params | wrap }},
 /* {{ m.name }}: one-way method (qmp.oneway); client stub and server dispatch arrive in W3. */
 {% endfor %}
 {% for t in svc.topics %}
-/* topic {{ t.name }} (0x{{ "%04X" | format(t.id) }}, {{ t.mode }}{% if t.depth %} depth {{ t.depth }}{% endif %}, sample {{ t.c_type }}):
- * subscribe/publish arrive in W3. */
+/* topic {{ t.name }} (0x{{ "%04X" | format(t.id) }}, {{ t.mode }}{% if t.depth %} depth {{ t.depth }}{% endif %}, sample {{ t.c_type }}).
+ * cb runs on the qmp_client_poll() thread. dropped > 0 reports updates this subscriber
+ * missed (overwritten in LATEST mode, pushed out of the queue in QUEUE mode). */
+typedef void (*{{ svc.prefix }}_{{ t.name }}_cb)(void *ctx, const {{ t.c_type }} *sample,
+    uint64_t seq, uint64_t dropped);
+
+typedef struct {{ svc.prefix }}_{{ t.name }}_sub {
+    qmp_sub_t sub;            /* runtime state — do not touch        */
+    {{ t.c_type }} sample;
+    {{ svc.prefix }}_{{ t.name }}_cb cb;
+    void *ctx;
+} {{ svc.prefix }}_{{ t.name }}_sub_t;
+
+/* Subscribe to {{ t.name }}; sub must stay valid until unsubscribed or the client closes.
+ * Then drive delivery with qmp_client_poll(). Reconnect resubscribes automatically. */
+int {{ svc.prefix }}_subscribe_{{ t.name }}(qmp_client_t *c,
+    {{ svc.prefix }}_{{ t.name }}_sub_t *sub, {{ svc.prefix }}_{{ t.name }}_cb cb, void *ctx);
+int {{ svc.prefix }}_unsubscribe_{{ t.name }}(qmp_client_t *c,
+    {{ svc.prefix }}_{{ t.name }}_sub_t *sub);
 {% endfor %}
 
 /* ---- server ------------------------------------------------------------ */
@@ -116,9 +138,18 @@ typedef struct {{ svc.prefix }}_ops {
     void (*on_client_gone)(void *ctx, int32_t pid); /* client process gone (W2), optional    */
 } {{ svc.prefix }}_ops;
 
-/* Register the service on an initialised server under instance_id (0 = default). */
+/* Register the service on an initialised server under instance_id (0 = default).
+{% if svc.topics %} * The server cfg must provide topicbuf of {{ svc.macro }}_TOPIC_STORAGE_SIZE bytes.
+{% endif %} */
 int {{ svc.prefix }}_register(qmp_server_t *s, uint16_t instance_id,
     const {{ svc.prefix }}_ops *ops, void *ctx);
+{% for t in svc.topics %}
+
+/* Publish {{ t.name }}: record the sample, bump the sequence number and notify every
+ * subscriber without blocking. EOK even when a slow subscriber's pulse is dropped —
+ * its pull cursor recovers and reports the loss. Any thread, no heap, no logging. */
+int {{ svc.prefix }}_publish_{{ t.name }}(qmp_server_t *s, const {{ t.c_type }} *sample);
+{% endfor %}
 
 /* Method table consumed by the runtime (sorted by id). */
 extern const qmp_service_desc_t {{ svc.prefix }}_desc;

@@ -28,14 +28,19 @@ extern "C" {
 #define DEMO_JOINT_V1_JOINT_M_GETSTATE 0x0003U
 #define DEMO_JOINT_V1_JOINT_M_BURN 0x0004U
 #define DEMO_JOINT_V1_JOINT_T_STATECHANGED 0x8001U
+#define DEMO_JOINT_V1_JOINT_T_STATELOG 0x8002U
 #define DEMO_JOINT_V1_JOINT_UURI_SETTARGET "/101/1/1"
 #define DEMO_JOINT_V1_JOINT_UURI_STOP "/101/1/2"
 #define DEMO_JOINT_V1_JOINT_UURI_GETSTATE "/101/1/3"
 #define DEMO_JOINT_V1_JOINT_UURI_BURN "/101/1/4"
 #define DEMO_JOINT_V1_JOINT_UURI_STATECHANGED "/101/1/8001"
-#define DEMO_JOINT_V1_JOINT_MAX_PAYLOAD  48U
+#define DEMO_JOINT_V1_JOINT_UURI_STATELOG "/101/1/8002"
+#define DEMO_JOINT_V1_JOINT_MAX_PAYLOAD  72U
 /* header + largest payload: size the server work buffer with this */
-#define DEMO_JOINT_V1_JOINT_MAX_MSG_SIZE (24U + 48U)
+#define DEMO_JOINT_V1_JOINT_MAX_MSG_SIZE (24U + 72U)
+/* qmp_server_cfg_t.topicbuf size (8-byte aligned storage) for this service's topics. */
+#define DEMO_JOINT_V1_JOINT_TOPIC_STORAGE_SIZE \
+    (QMP_SERVER_SUBTABLE_SIZE + QMP_TOPIC_STATE_SIZE(48U, 1U) + QMP_TOPIC_STATE_SIZE(48U, 8U))
 
 /* ---- payload structs (field-number order, explicit padding) ------------ */
 /* message demo.joint.v1.SetTargetRequest */
@@ -133,8 +138,44 @@ int demo_joint_v1_Joint_Burn_ex(qmp_client_t *c,
     int32_t *status,
     const qmp_call_opts_t *opts);
 /* Stop: one-way method (qmp.oneway); client stub and server dispatch arrive in W3. */
-/* topic StateChanged (0x8001, LATEST, sample demo_joint_v1_JointState):
- * subscribe/publish arrive in W3. */
+/* topic StateChanged (0x8001, LATEST, sample demo_joint_v1_JointState).
+ * cb runs on the qmp_client_poll() thread. dropped > 0 reports updates this subscriber
+ * missed (overwritten in LATEST mode, pushed out of the queue in QUEUE mode). */
+typedef void (*demo_joint_v1_Joint_StateChanged_cb)(void *ctx, const demo_joint_v1_JointState *sample,
+    uint64_t seq, uint64_t dropped);
+
+typedef struct demo_joint_v1_Joint_StateChanged_sub {
+    qmp_sub_t sub;            /* runtime state — do not touch        */
+    demo_joint_v1_JointState sample;
+    demo_joint_v1_Joint_StateChanged_cb cb;
+    void *ctx;
+} demo_joint_v1_Joint_StateChanged_sub_t;
+
+/* Subscribe to StateChanged; sub must stay valid until unsubscribed or the client closes.
+ * Then drive delivery with qmp_client_poll(). Reconnect resubscribes automatically. */
+int demo_joint_v1_Joint_subscribe_StateChanged(qmp_client_t *c,
+    demo_joint_v1_Joint_StateChanged_sub_t *sub, demo_joint_v1_Joint_StateChanged_cb cb, void *ctx);
+int demo_joint_v1_Joint_unsubscribe_StateChanged(qmp_client_t *c,
+    demo_joint_v1_Joint_StateChanged_sub_t *sub);
+/* topic StateLog (0x8002, QUEUE depth 8, sample demo_joint_v1_JointState).
+ * cb runs on the qmp_client_poll() thread. dropped > 0 reports updates this subscriber
+ * missed (overwritten in LATEST mode, pushed out of the queue in QUEUE mode). */
+typedef void (*demo_joint_v1_Joint_StateLog_cb)(void *ctx, const demo_joint_v1_JointState *sample,
+    uint64_t seq, uint64_t dropped);
+
+typedef struct demo_joint_v1_Joint_StateLog_sub {
+    qmp_sub_t sub;            /* runtime state — do not touch        */
+    demo_joint_v1_JointState sample;
+    demo_joint_v1_Joint_StateLog_cb cb;
+    void *ctx;
+} demo_joint_v1_Joint_StateLog_sub_t;
+
+/* Subscribe to StateLog; sub must stay valid until unsubscribed or the client closes.
+ * Then drive delivery with qmp_client_poll(). Reconnect resubscribes automatically. */
+int demo_joint_v1_Joint_subscribe_StateLog(qmp_client_t *c,
+    demo_joint_v1_Joint_StateLog_sub_t *sub, demo_joint_v1_Joint_StateLog_cb cb, void *ctx);
+int demo_joint_v1_Joint_unsubscribe_StateLog(qmp_client_t *c,
+    demo_joint_v1_Joint_StateLog_sub_t *sub);
 
 /* ---- server ------------------------------------------------------------ */
 /* Handlers run on a libqmp worker thread at the CALLER's priority (inherited).
@@ -160,9 +201,21 @@ typedef struct demo_joint_v1_Joint_ops {
     void (*on_client_gone)(void *ctx, int32_t pid); /* client process gone (W2), optional    */
 } demo_joint_v1_Joint_ops;
 
-/* Register the service on an initialised server under instance_id (0 = default). */
+/* Register the service on an initialised server under instance_id (0 = default).
+ * The server cfg must provide topicbuf of DEMO_JOINT_V1_JOINT_TOPIC_STORAGE_SIZE bytes.
+ */
 int demo_joint_v1_Joint_register(qmp_server_t *s, uint16_t instance_id,
     const demo_joint_v1_Joint_ops *ops, void *ctx);
+
+/* Publish StateChanged: record the sample, bump the sequence number and notify every
+ * subscriber without blocking. EOK even when a slow subscriber's pulse is dropped —
+ * its pull cursor recovers and reports the loss. Any thread, no heap, no logging. */
+int demo_joint_v1_Joint_publish_StateChanged(qmp_server_t *s, const demo_joint_v1_JointState *sample);
+
+/* Publish StateLog: record the sample, bump the sequence number and notify every
+ * subscriber without blocking. EOK even when a slow subscriber's pulse is dropped —
+ * its pull cursor recovers and reports the loss. Any thread, no heap, no logging. */
+int demo_joint_v1_Joint_publish_StateLog(qmp_server_t *s, const demo_joint_v1_JointState *sample);
 
 /* Method table consumed by the runtime (sorted by id). */
 extern const qmp_service_desc_t demo_joint_v1_Joint_desc;

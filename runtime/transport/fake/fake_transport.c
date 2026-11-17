@@ -23,6 +23,10 @@
 #define QMP_FAKE_MAX_SLOTS     16
 #define QMP_FAKE_MAX_CONNS     16
 #define QMP_FAKE_MAX_EVENTS    32
+#define QMP_FAKE_MAX_NOTIFY    16
+#define QMP_FAKE_NOTIFY_DEPTH  8
+#define QMP_FAKE_MAX_REGS      32
+#define QMP_FAKE_EVENT_MAGIC   0x514D5045U /* "QMPE" */
 
 enum slot_state {
     SLOT_FREE = 0,
@@ -72,6 +76,46 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static endpoint_t g_eps[QMP_FAKE_MAX_ENDPOINTS];
 static bool g_inited;
 
+/* ---- notification channels (model of the client's private pulse channel) --- */
+/* Bounded pulse queue per channel: a full queue silently drops the pulse, exactly like
+ * MsgDeliverEvent failing to queue on QNX (V-QNX-044) — correctness must come from the
+ * pull cursor, never from pulse delivery. */
+typedef struct notify_chan {
+    bool used;
+    bool server_gone; /* the endpoint a registration pointed at shut down (COIDDEATH) */
+    uint32_t gen;
+    int64_t q[QMP_FAKE_NOTIFY_DEPTH];
+    int q_head;
+    int q_count;
+    pthread_cond_t cv;
+} notify_chan_t;
+static notify_chan_t g_notify[QMP_FAKE_MAX_NOTIFY];
+
+/* Registered events (model of MsgRegisterEvent): bound to the registering connection's
+ * endpoint; deliver() through any other endpoint is refused with EACCES, like the kernel
+ * refusing an unregistered event (V-QNX-042). Cleared when the connection goes away,
+ * like kernel cleanup on ConnectDetach / process exit. */
+typedef struct fake_reg {
+    bool used;
+    int notify_idx;
+    uint32_t notify_gen;
+    int ep_index;
+    uint32_t ep_gen;
+    int32_t scoid; /* registering connection */
+    uint32_t reg_id;
+} fake_reg_t;
+static fake_reg_t g_regs[QMP_FAKE_MAX_REGS];
+static uint32_t g_reg_seq;
+
+/* Wire form of a fake registered event inside the SUBSCRIBE blob. */
+typedef struct fake_event_blob {
+    uint32_t magic;
+    uint32_t reg_id;
+    int32_t reg_idx;
+    uint32_t _pad0;
+} fake_event_blob_t;
+QMP_STATIC_ASSERT(sizeof(fake_event_blob_t) <= QMP_EVENT_BLOB_MAX, "fake event blob");
+
 static void init_locked(void) {
     if (g_inited) {
         return;
@@ -80,13 +124,18 @@ static void init_locked(void) {
         (void)pthread_cond_init(&g_eps[i].cv_server, NULL);
         (void)pthread_cond_init(&g_eps[i].cv_client, NULL);
     }
+    for (int i = 0; i < QMP_FAKE_MAX_NOTIFY; i++) {
+        (void)pthread_cond_init(&g_notify[i].cv, NULL);
+    }
     g_inited = true;
 }
 
 typedef struct conn_impl {
     int ep_index;
     uint32_t ep_gen;
-    int32_t scoid; /* 0 = not connected */
+    int32_t scoid;   /* 0 = not connected */
+    int notify_idx1; /* notify channel index + 1; 0 = none */
+    uint32_t notify_gen;
 } conn_impl_t;
 QMP_STATIC_ASSERT(sizeof(conn_impl_t) <= sizeof(qmp_conn_t), "conn storage");
 
@@ -168,6 +217,32 @@ static void push_event(endpoint_t *ep, uint16_t kind, int32_t scoid, int32_t pid
     ev->rcvid = rcvid;
     ep->ev_count++;
     (void)pthread_cond_broadcast(&ep->cv_server);
+}
+
+/* g_lock held. Kernel-cleanup model: registrations die with the registering connection. */
+static void drop_regs_for_conn(int ep_index, uint32_t ep_gen, int32_t scoid) {
+    for (int i = 0; i < QMP_FAKE_MAX_REGS; i++) {
+        fake_reg_t *r = &g_regs[i];
+        if (r->used && r->ep_index == ep_index && r->ep_gen == ep_gen && r->scoid == scoid) {
+            memset(r, 0, sizeof(*r));
+        }
+    }
+}
+
+/* g_lock held. The server endpoint shut down: registrations on it die and their notify
+ * channels observe COIDDEATH (server_gone), like _NTO_CHF_COID_DISCONNECT (V-QNX-046). */
+static void drop_regs_for_ep(int ep_index, uint32_t ep_gen) {
+    for (int i = 0; i < QMP_FAKE_MAX_REGS; i++) {
+        fake_reg_t *r = &g_regs[i];
+        if (r->used && r->ep_index == ep_index && r->ep_gen == ep_gen) {
+            notify_chan_t *nc = &g_notify[r->notify_idx];
+            if (nc->used && nc->gen == r->notify_gen) {
+                nc->server_gone = true;
+                (void)pthread_cond_broadcast(&nc->cv);
+            }
+            memset(r, 0, sizeof(*r));
+        }
+    }
 }
 
 /* ---- client ------------------------------------------------------------- */
@@ -302,6 +377,8 @@ static int fake_disconnect(qmp_conn_t *conn) {
                 push_event(ep, QMP_RCV_DISCONNECT, c->scoid, (int32_t)getpid(), 0);
             }
         }
+        /* The kernel unregisters events when the registering connection detaches. */
+        drop_regs_for_conn(c->ep_index, c->ep_gen, c->scoid);
     }
     (void)pthread_mutex_unlock(&g_lock);
     c->ep_index = -1;
@@ -495,6 +572,7 @@ static int fake_unblock(qmp_endpoint_t *ep_) {
     (void)pthread_mutex_lock(&g_lock);
     endpoint_t *ep = &g_eps[e->ep_index];
     ep->shutdown = true;
+    drop_regs_for_ep(e->ep_index, ep->gen); /* subscribers see COIDDEATH */
     (void)pthread_cond_broadcast(&ep->cv_server);
     (void)pthread_cond_broadcast(&ep->cv_client); /* callers blocked on a dying server */
     (void)pthread_mutex_unlock(&g_lock);
@@ -508,6 +586,7 @@ static int fake_close(qmp_endpoint_t *ep_) {
     ep->shutdown = true;
     ep->used = false;
     ep->path[0] = '\0';
+    drop_regs_for_ep(e->ep_index, ep->gen);
     (void)pthread_cond_broadcast(&ep->cv_server);
     (void)pthread_cond_broadcast(&ep->cv_client);
     (void)pthread_mutex_unlock(&g_lock);
@@ -515,9 +594,211 @@ static int fake_close(qmp_endpoint_t *ep_) {
     return EOK;
 }
 
+/* ---- topics: notify channel, registered events, delivery ------------------ */
+
+static int fake_notify_open(qmp_conn_t *conn) {
+    conn_impl_t *c = (conn_impl_t *)(void *)conn;
+    if (c->notify_idx1 != 0) {
+        return EOK; /* idempotent */
+    }
+    (void)pthread_mutex_lock(&g_lock);
+    init_locked();
+    int rc = EAGAIN;
+    for (int i = 0; i < QMP_FAKE_MAX_NOTIFY; i++) {
+        notify_chan_t *nc = &g_notify[i];
+        if (!nc->used) {
+            nc->used = true;
+            nc->server_gone = false;
+            nc->gen++;
+            nc->q_head = 0;
+            nc->q_count = 0;
+            c->notify_idx1 = i + 1;
+            c->notify_gen = nc->gen;
+            rc = EOK;
+            break;
+        }
+    }
+    (void)pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
+static int fake_notify_wait(qmp_conn_t *conn, uint64_t timeout_ns, int64_t *value) {
+    conn_impl_t *c = (conn_impl_t *)(void *)conn;
+    *value = 0;
+    if (c->notify_idx1 == 0) {
+        return EINVAL;
+    }
+    struct timespec deadline;
+    if (timeout_ns != 0) {
+        abs_deadline(&deadline, timeout_ns);
+    }
+    (void)pthread_mutex_lock(&g_lock);
+    notify_chan_t *nc = &g_notify[c->notify_idx1 - 1];
+    int rc;
+    for (;;) {
+        if (!nc->used || nc->gen != c->notify_gen) {
+            rc = ECANCELED; /* notify_close() ran */
+            break;
+        }
+        if (nc->q_count > 0) { /* queued pulses are delivered before COIDDEATH */
+            *value = nc->q[nc->q_head];
+            nc->q_head = (nc->q_head + 1) % QMP_FAKE_NOTIFY_DEPTH;
+            nc->q_count--;
+            rc = EOK;
+            break;
+        }
+        if (nc->server_gone) {
+            rc = ESRCH;
+            break;
+        }
+        if (timeout_ns != 0) {
+            if (pthread_cond_timedwait(&nc->cv, &g_lock, &deadline) == ETIMEDOUT) {
+                rc = ETIMEDOUT;
+                break;
+            }
+        } else {
+            (void)pthread_cond_wait(&nc->cv, &g_lock);
+        }
+    }
+    (void)pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
+static int fake_notify_close(qmp_conn_t *conn) {
+    conn_impl_t *c = (conn_impl_t *)(void *)conn;
+    if (c->notify_idx1 == 0) {
+        return EOK;
+    }
+    (void)pthread_mutex_lock(&g_lock);
+    notify_chan_t *nc = &g_notify[c->notify_idx1 - 1];
+    if (nc->used && nc->gen == c->notify_gen) {
+        nc->used = false;
+        nc->gen++;
+        (void)pthread_cond_broadcast(&nc->cv);
+    }
+    (void)pthread_mutex_unlock(&g_lock);
+    c->notify_idx1 = 0;
+    return EOK;
+}
+
+static int fake_event_register(qmp_conn_t *conn, uint8_t *blob, size_t cap, size_t *len) {
+    conn_impl_t *c = (conn_impl_t *)(void *)conn;
+    *len = 0;
+    if (c->notify_idx1 == 0 || cap < sizeof(fake_event_blob_t)) {
+        return EINVAL;
+    }
+    (void)pthread_mutex_lock(&g_lock);
+    endpoint_t *ep = c->ep_index >= 0 ? &g_eps[c->ep_index] : NULL;
+    int rc;
+    if (ep == NULL || !ep->used || ep->shutdown || ep->gen != c->ep_gen) {
+        rc = ESRCH; /* registration is bound to a live server connection */
+    } else {
+        rc = EAGAIN;
+        for (int i = 0; i < QMP_FAKE_MAX_REGS; i++) {
+            fake_reg_t *r = &g_regs[i];
+            if (r->used) {
+                continue;
+            }
+            if (++g_reg_seq == 0) {
+                ++g_reg_seq;
+            }
+            r->used = true;
+            r->notify_idx = c->notify_idx1 - 1;
+            r->notify_gen = c->notify_gen;
+            r->ep_index = c->ep_index;
+            r->ep_gen = c->ep_gen;
+            r->scoid = c->scoid;
+            r->reg_id = g_reg_seq;
+            fake_event_blob_t b = {QMP_FAKE_EVENT_MAGIC, r->reg_id, i, 0};
+            memcpy(blob, &b, sizeof(b));
+            *len = sizeof(b);
+            rc = EOK;
+            break;
+        }
+    }
+    (void)pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
+static int fake_event_unregister(qmp_conn_t *conn, const uint8_t *blob, size_t len) {
+    (void)conn;
+    fake_event_blob_t b;
+    if (len != sizeof(b)) {
+        return EINVAL;
+    }
+    memcpy(&b, blob, sizeof(b));
+    if (b.magic != QMP_FAKE_EVENT_MAGIC || b.reg_idx < 0 || b.reg_idx >= QMP_FAKE_MAX_REGS) {
+        return EINVAL;
+    }
+    (void)pthread_mutex_lock(&g_lock);
+    fake_reg_t *r = &g_regs[b.reg_idx];
+    int rc = ESRCH;
+    if (r->used && r->reg_id == b.reg_id) {
+        memset(r, 0, sizeof(*r));
+        rc = EOK;
+    }
+    (void)pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
+/* Model of MsgDeliverEvent: non-blocking; refuses an event that was not registered
+ * against THIS endpoint (EACCES, V-QNX-042); reports a gone subscriber with ESRCH. A
+ * full pulse queue silently drops the pulse (V-QNX-044) — never an error, never a block. */
+static int fake_deliver(qmp_endpoint_t *ep_, int64_t rcvid, const uint8_t *blob, size_t len,
+                        int64_t value) {
+    (void)rcvid; /* the fake matches by registration, not by receive id */
+    ep_impl_t *e = (ep_impl_t *)(void *)ep_;
+    fake_event_blob_t b;
+    if (len != sizeof(b)) {
+        return EINVAL;
+    }
+    memcpy(&b, blob, sizeof(b));
+    if (b.magic != QMP_FAKE_EVENT_MAGIC || b.reg_idx < 0 || b.reg_idx >= QMP_FAKE_MAX_REGS) {
+        return EACCES; /* never registered */
+    }
+    (void)pthread_mutex_lock(&g_lock);
+    fake_reg_t *r = &g_regs[b.reg_idx];
+    int rc;
+    if (!r->used || r->reg_id != b.reg_id) {
+        rc = ESRCH; /* registration died with its connection */
+    } else if (r->ep_index != e->ep_index || r->ep_gen != g_eps[e->ep_index].gen) {
+        rc = EACCES; /* registered with a different server */
+    } else {
+        notify_chan_t *nc = &g_notify[r->notify_idx];
+        if (!nc->used || nc->gen != r->notify_gen) {
+            rc = ESRCH; /* subscriber's channel is gone */
+        } else {
+            if (nc->q_count < QMP_FAKE_NOTIFY_DEPTH) {
+                nc->q[(nc->q_head + nc->q_count) % QMP_FAKE_NOTIFY_DEPTH] = value;
+                nc->q_count++;
+                (void)pthread_cond_broadcast(&nc->cv);
+            }
+            rc = EOK;
+        }
+    }
+    (void)pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
 static const qmp_transport_t g_fake = {
-    "fake",     fake_connect, fake_call,    fake_disconnect, fake_listen,        fake_receive,
-    fake_reply, fake_error,   fake_unblock, fake_close,      fake_receive_pulse, fake_unblock_req,
+    "fake",
+    fake_connect,
+    fake_call,
+    fake_disconnect,
+    fake_listen,
+    fake_receive,
+    fake_reply,
+    fake_error,
+    fake_unblock,
+    fake_close,
+    fake_receive_pulse,
+    fake_unblock_req,
+    fake_notify_open,
+    fake_notify_wait,
+    fake_notify_close,
+    fake_event_register,
+    fake_event_unregister,
+    fake_deliver,
 };
 
 const qmp_transport_t *qmp_transport_fake(void) {

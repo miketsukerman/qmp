@@ -51,6 +51,22 @@ static const qmp_method_desc_t {{ svc.prefix }}_methods[] = {
 {% endfor %}
 };
 
+{% if svc.topics %}
+static const qmp_topic_desc_t {{ svc.prefix }}_topics[] = {
+{% for t in svc.topics %}
+    {
+        {{ svc.macro }}_T_{{ t.upper }},
+        {{ t.mode_enum }},
+        {{ t.depth }}U,
+        0U,
+        (uint32_t)sizeof({{ t.c_type }}),
+        0U,
+        "{{ t.name }}",
+    },
+{% endfor %}
+};
+
+{% endif %}
 const qmp_service_desc_t {{ svc.prefix }}_desc = {
     {{ svc.macro }}_SERVICE_ID,
     {{ svc.macro }}_VER_MAJOR,
@@ -59,12 +75,25 @@ const qmp_service_desc_t {{ svc.prefix }}_desc = {
     {{ svc.macro }}_SERVICE_NAME,
     {{ svc.prefix }}_methods,
     sizeof({{ svc.prefix }}_methods) / sizeof({{ svc.prefix }}_methods[0]),
+{% if svc.topics %}
+    {{ svc.prefix }}_topics,
+    sizeof({{ svc.prefix }}_topics) / sizeof({{ svc.prefix }}_topics[0]),
+{% else %}
+    NULL,
+    0U,
+{% endif %}
 };
 
 int {{ svc.prefix }}_register(qmp_server_t *s, uint16_t instance_id,
     const {{ svc.prefix }}_ops *ops, void *ctx) {
     return qmp_server_register(s, &{{ svc.prefix }}_desc, instance_id, ops, ctx);
 }
+{% for t in svc.topics %}
+
+int {{ svc.prefix }}_publish_{{ t.name }}(qmp_server_t *s, const {{ t.c_type }} *sample) {
+    return qmp_server_publish(s, {{ svc.macro }}_T_{{ t.upper }}, sample, sizeof(*sample));
+}
+{% endfor %}
 
 /* ---- client stubs ------------------------------------------------------ */
 int {{ svc.prefix }}_connect(qmp_client_t *c, uint16_t instance_id,
@@ -86,6 +115,32 @@ int {{ svc.prefix }}_{{ m.name }}_ex({{ m.params | wrap }},
 
 int {{ svc.prefix }}_{{ m.name }}({{ m.params | wrap }}) {
     return {{ svc.prefix }}_{{ m.name }}_ex({{ m.args | wrap(8, 60) }}, NULL);
+}
+
+{% endfor %}
+{% for t in svc.topics %}
+/* qmp_sub_cb_t -> typed {{ t.name }} callback; runs on the qmp_client_poll() thread. */
+static void {{ svc.prefix }}_tr_topic_{{ t.name }}(void *ctx, const void *sample, uint32_t len,
+    uint64_t seq, uint64_t dropped) {
+    {{ svc.prefix }}_{{ t.name }}_sub_t *s = ({{ svc.prefix }}_{{ t.name }}_sub_t *)ctx;
+    if (len != sizeof({{ t.c_type }}) || s->cb == NULL) {
+        return; /* size mismatch: drop rather than hand out a short sample */
+    }
+    s->cb(s->ctx, (const {{ t.c_type }} *)sample, seq, dropped);
+}
+
+int {{ svc.prefix }}_subscribe_{{ t.name }}(qmp_client_t *c,
+    {{ svc.prefix }}_{{ t.name }}_sub_t *sub, {{ svc.prefix }}_{{ t.name }}_cb cb, void *ctx) {
+    sub->cb = cb;
+    sub->ctx = ctx;
+    return qmp_client_subscribe(c, {{ svc.macro }}_T_{{ t.upper }}, &sub->sample,
+                                sizeof(sub->sample), {{ svc.prefix }}_tr_topic_{{ t.name }},
+                                sub, &sub->sub);
+}
+
+int {{ svc.prefix }}_unsubscribe_{{ t.name }}(qmp_client_t *c,
+    {{ svc.prefix }}_{{ t.name }}_sub_t *sub) {
+    return qmp_client_unsubscribe(c, &sub->sub);
 }
 
 {% endfor %}

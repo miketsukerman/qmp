@@ -95,7 +95,7 @@ transport is wrong, not the kernel — file it and the fake gets fixed (ADR-009)
 
 ## 5. Run the smoke scenarios (what the fake can never exercise)
 
-Four things only a real kernel can prove, orchestrated over SSH by
+Five things only a real kernel can prove, orchestrated over SSH by
 `scripts/target-smoke.sh` (two OS processes, real `kill -9`):
 
 ```sh
@@ -115,6 +115,10 @@ scripts/target-smoke.sh
 4. **race** — a deferred reply from another server thread races the client's timeout.
    Whichever wins, exactly one of {reply, ETIMEDOUT} reaches the client and the request slot
    is freed exactly once.
+5. **saturate** — two slow calls occupy both server workers, so a third client's message
+   cannot be received. Its 1000 ms timeout must still fire on time: the kernel ends the
+   SEND-blocked call with `ETIMEDOUT` at ~1000 ms (asserted window 995–1250 ms), the slow
+   calls complete normally, and the server keeps serving.
 
 Each prints `PASS`/`FAIL`; the script exits non-zero on any failure.
 

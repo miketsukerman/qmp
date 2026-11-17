@@ -49,8 +49,26 @@ enum qmp_req_state {
     QMP_REQ_DONE     /* replied while ACTIVE; dispatch frees the slot */
 };
 
+/* Per-worker in-flight slot: the synchronous request this worker is currently running a
+ * handler for. Preallocated in the server (one per worker, no heap); guarded by pool_mu.
+ * An UNBLOCK pulse claims the slot (RUNNING -> CANCELED) and sends the error reply; the
+ * owning worker is the only other writer and clears the slot when the handler returns. */
+enum qmp_infl_state {
+    QMP_INFL_IDLE = 0,
+    QMP_INFL_RUNNING,  /* handler running; rcvid/scoid valid              */
+    QMP_INFL_CANCELED, /* unblock/disconnect cancelled it; do not reply   */
+};
+
+typedef struct qmp_inflight {
+    int64_t rcvid;
+    int32_t scoid;
+    uint8_t state; /* enum qmp_infl_state */
+    uint8_t _pad0[3];
+} qmp_inflight_t;
+
 typedef struct qmp_req_impl {
     struct qmp_server_impl *server;
+    qmp_inflight_t *infl; /* worker's in-flight slot while the handler runs; else NULL */
     int64_t rcvid;
     qmp_req_info_t info;
     qmp_hdr_t h;       /* request header, needed to build the deferred reply */
@@ -78,8 +96,14 @@ typedef struct qmp_server_impl {
     uint8_t registered;
     uint8_t listening;
     uint8_t running;
-    uint8_t _pad0[2];
+    uint8_t verbose;       /* log pulses/cancellations (off the fast path)      */
+    uint8_t has_pulse_thr; /* transport provides receive_pulse; thread running  */
+    uint32_t listen_flags; /* enum qmp_listen_flags                             */
+    uint8_t _pad0[4];
     pthread_t workers[QMP_SERVER_MAX_THREADS];
+    pthread_t pulse_thread;
+    /* One in-flight slot per worker (index = worker index); guarded by pool_mu. */
+    qmp_inflight_t inflight[QMP_SERVER_MAX_THREADS];
     char path[QMP_NAME_MAX];
     /* Deferred-reply pool (caller storage) and lifecycle callbacks (cfg). pool_mu guards
      * slot states only; it is never held across a reply or a callback. */
@@ -96,9 +120,11 @@ QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_server_impl_t) <= QMP_ALIGNOF(qmp_server_t),
 
 /* Dispatch one received message held in rcv (len bytes). Writes the reply into rep
  * (capacity rep_cap) or sends a transport error. Never returns an error to the loop:
- * everything is reported to the client. Exposed for unit tests. */
+ * everything is reported to the client. infl is the calling worker's in-flight slot
+ * (NULL = cancellation of running handlers disabled, e.g. direct test calls).
+ * Exposed for unit tests. */
 void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8_t *rcv, size_t len,
-                         uint8_t *rep, size_t rep_cap);
+                         uint8_t *rep, size_t rep_cap, qmp_inflight_t *infl);
 
 /* Pure dispatch decision (testable without a transport). Returns EOK when the request may
  * run and sets *out_m; else the errno the client must receive. */

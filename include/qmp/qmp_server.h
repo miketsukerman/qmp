@@ -17,8 +17,8 @@
 extern "C" {
 #endif
 
-#define QMP_SERVER_STORAGE_U64 64
-#define QMP_REQ_STORAGE_U64    8
+#define QMP_SERVER_STORAGE_U64 72
+#define QMP_REQ_STORAGE_U64    10
 #define QMP_SERVER_MAX_THREADS 8
 
 typedef struct qmp_server {
@@ -84,6 +84,12 @@ typedef struct qmp_service_desc {
 typedef struct qmp_server_cfg {
     const qmp_transport_t *transport; /* NULL = qmp_transport_default()                    */
     int nthreads;                     /* 1..QMP_SERVER_MAX_THREADS; 0 = default 4          */
+    /* enum qmp_listen_flags (qmp_transport.h). QMP_LISTEN_FIXED_PRIORITY is a negative
+     * control for demos only; the default (0) keeps priority inheritance. */
+    uint32_t listen_flags;
+    /* Log pulses, cancellations and dropped (stale/no-match) unblock pulses. Never on the
+     * fast path: only lifecycle events are logged. */
+    int verbose;
     /* Caller-provided work buffer: nthreads x (receive + reply) x max_msg_size bytes.
      * Use QMP_SERVER_WORKBUF_SIZE(). Must be 8-byte aligned. */
     void *workbuf;
@@ -101,9 +107,11 @@ typedef struct qmp_server_cfg {
      * Policy (qmp.allow_types, permission levels) is layered on top of this hook. */
     int (*acl_check)(void *ctx, const qmp_cred_t *cred, uint16_t resource_id);
 
-    /* A parked deferred request was cancelled: the client timed out (kernel unblock
-     * pulse) or its process disconnected. The req pointer is invalid once this returns;
-     * do not call qmp_req_reply() on it. Worker thread. NULL = no notification. */
+    /* A deferred request was cancelled before the app replied: the client timed out or
+     * was signalled (kernel unblock pulse) or its process disconnected. Fires for PARKED
+     * requests and when a handler returns QMP_DEFERRED for a request that was already
+     * cancelled while it ran. The req pointer is invalid once this returns; do not call
+     * qmp_req_reply() on it. Worker or pulse thread. NULL = no notification. */
     void (*on_cancel)(void *ctx, qmp_req_t *req);
 
     /* A client process closed its last connection (QNX disconnect pulse). The runtime
@@ -135,6 +143,14 @@ uint32_t qmp_server_generation(const qmp_server_t *s);
 
 /* Inside a handler: information about the caller. */
 int qmp_req_get_info(const qmp_req_t *req, qmp_req_info_t *info);
+
+/* Inside a RUNNING handler: 1 when the request was cancelled (client timeout/signal
+ * unblock, or its process disconnected). The runtime has already released the client (or
+ * the client is gone); the handler should stop early and return — its result is discarded
+ * and no second reply is sent. Takes a short internal lock: poll at a modest rate, not in
+ * the innermost loop. For PARKED (deferred) requests use on_cancel instead; after the
+ * handler returned this function must not be called. */
+int qmp_req_canceled(const qmp_req_t *req);
 
 /* Complete a request whose handler returned QMP_DEFERRED. Any thread. status == 0
  * requires payload_len == the method's reply size; status != 0 requires payload_len == 0.

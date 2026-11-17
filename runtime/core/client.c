@@ -13,6 +13,12 @@ static const qmp_client_impl_t *cimpl(const qmp_client_t *c) {
     return (const qmp_client_impl_t *)(const void *)c;
 }
 
+static uint64_t mono_ns(void) {
+    struct timespec ts;
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 int qmp_client_init(qmp_client_t *c, const qmp_client_cfg_t *cfg) {
     if (c == NULL) {
         return EINVAL;
@@ -39,7 +45,14 @@ static int do_call(qmp_client_impl_t *ci, qmp_hdr_t *req_hdr, const void *req, s
     int rparts = rep_cap > 0 ? 2 : 1;
     size_t reply_len = 0;
     memset(rep_hdr, 0, sizeof(*rep_hdr));
+    uint64_t t0 = timeout_ns != 0 ? mono_ns() : 0;
     int rc = ci->tr->call(&ci->conn, siov, sparts, riov, rparts, timeout_ns, &reply_len);
+    if (rc == ECANCELED && timeout_ns != 0 && mono_ns() - t0 >= timeout_ns) {
+        /* The server cannot tell a timeout from a signal and answers a kernel unblock
+         * with neutral ECANCELED (DESIGN §3.8). Only the client knows its own deadline:
+         * report ETIMEDOUT exactly when it has passed, else keep ECANCELED (signal). */
+        rc = ETIMEDOUT;
+    }
     if (rc != EOK) {
         return rc;
     }
@@ -110,11 +123,14 @@ int qmp_client_connect(qmp_client_t *c, uint16_t service_id, uint16_t instance_i
 }
 
 /* A dead server makes the connection useless: drop it so calls fail fast with ENOTCONN
- * and qmp_client_reconnect() can run. Never retries the call itself (DESIGN §3.7). */
+ * and qmp_client_reconnect() can run. Never retries the call itself (DESIGN §3.7). Only
+ * reached in the connected state: EBADF (stale coid after the server died) is normalized
+ * to ESRCH so callers see one "server gone" errno. Connect-path errors stay raw. */
 static int mark_dead_on(int rc, qmp_client_impl_t *ci) {
     if (rc == ESRCH || rc == EBADF) {
         (void)ci->tr->disconnect(&ci->conn);
         ci->connected = 0;
+        rc = ESRCH;
     }
     return rc;
 }

@@ -245,7 +245,8 @@ static int fake_call(qmp_conn_t *conn, const qmp_iov_t *siov, int sparts, const 
     sl->err = 0;
     sl->scoid = c->scoid;
     sl->unblock_sent = false;
-    (void)pthread_cond_signal(&ep->cv_server);
+    /* Broadcast: a signal could wake only the pulse thread, which never takes messages. */
+    (void)pthread_cond_broadcast(&ep->cv_server);
 
     struct timespec deadline;
     if (timeout_ns != 0) {
@@ -309,7 +310,8 @@ static int fake_disconnect(qmp_conn_t *conn) {
 }
 
 /* ---- server ------------------------------------------------------------- */
-static int fake_listen(qmp_endpoint_t *ep_, const char *path) {
+static int fake_listen(qmp_endpoint_t *ep_, const char *path, uint32_t flags) {
+    (void)flags; /* no scheduler in-process: QMP_LISTEN_FIXED_PRIORITY is a no-op */
     ep_impl_t *e = (ep_impl_t *)(void *)ep_;
     if (strlen(path) >= QMP_NAME_MAX) {
         return ENAMETOOLONG;
@@ -444,6 +446,50 @@ static int fake_error(qmp_endpoint_t *ep_, int64_t rcvid, int err) {
     return rc;
 }
 
+/* Pulse-only receive: lifecycle events without ever consuming a message (models a thread
+ * blocked in MsgReceivePulse on the shared channel). */
+static int fake_receive_pulse(qmp_endpoint_t *ep_, qmp_rcv_info_t *info) {
+    ep_impl_t *e = (ep_impl_t *)(void *)ep_;
+    (void)pthread_mutex_lock(&g_lock);
+    endpoint_t *ep = &g_eps[e->ep_index];
+    for (;;) {
+        if (ep->shutdown) {
+            (void)pthread_mutex_unlock(&g_lock);
+            return ECANCELED;
+        }
+        if (ep->ev_count > 0) {
+            fake_event_t ev = ep->evq[ep->ev_head];
+            ep->ev_head = (ep->ev_head + 1) % QMP_FAKE_MAX_EVENTS;
+            ep->ev_count--;
+            (void)pthread_mutex_unlock(&g_lock);
+            memset(info, 0, sizeof(*info));
+            info->kind = ev.kind;
+            info->scoid = ev.scoid;
+            info->pid = ev.pid;
+            info->rcvid = ev.rcvid;
+            return EOK;
+        }
+        (void)pthread_cond_wait(&ep->cv_server, &g_lock);
+    }
+}
+
+/* MsgInfo(_NTO_MI_UNBLOCK_REQ) model: 1 only while the client owning this rcvid is still
+ * blocked on it AND has asked to be unblocked (timeout fired / injected signal). A freed
+ * or reused slot (different gen) reports 0, which is what defeats stale pulses. */
+static int fake_unblock_req(qmp_endpoint_t *ep_, int64_t rcvid) {
+    ep_impl_t *e = (ep_impl_t *)(void *)ep_;
+    int idx = (int)(rcvid & 0xFFFF);
+    uint32_t gen = (uint32_t)(rcvid >> 16);
+    if (idx < 0 || idx >= QMP_FAKE_MAX_SLOTS) {
+        return 0;
+    }
+    (void)pthread_mutex_lock(&g_lock);
+    slot_t *sl = &g_eps[e->ep_index].slots[idx];
+    int req = sl->gen == gen && sl->state == SLOT_RECEIVED && sl->unblock_sent;
+    (void)pthread_mutex_unlock(&g_lock);
+    return req;
+}
+
 static int fake_unblock(qmp_endpoint_t *ep_) {
     ep_impl_t *e = (ep_impl_t *)(void *)ep_;
     (void)pthread_mutex_lock(&g_lock);
@@ -470,12 +516,36 @@ static int fake_close(qmp_endpoint_t *ep_) {
 }
 
 static const qmp_transport_t g_fake = {
-    "fake",       fake_connect, fake_call,  fake_disconnect, fake_listen,
-    fake_receive, fake_reply,   fake_error, fake_unblock,    fake_close,
+    "fake",     fake_connect, fake_call,    fake_disconnect, fake_listen,        fake_receive,
+    fake_reply, fake_error,   fake_unblock, fake_close,      fake_receive_pulse, fake_unblock_req,
 };
 
 const qmp_transport_t *qmp_transport_fake(void) {
     return &g_fake;
+}
+
+/* Test-only: simulate a signal hitting a REPLY-blocked client (kernel unblock pulse
+ * before the client's own deadline). Picks the first RECEIVED slot without a pending
+ * unblock; the client stays blocked until the server replies or errors, like the kernel. */
+int qmp_transport_fake_unblock_inject(const char *path) {
+    (void)pthread_mutex_lock(&g_lock);
+    init_locked();
+    endpoint_t *ep = find_locked(path);
+    int rc = ESRCH;
+    if (ep != NULL && !ep->shutdown) {
+        for (int i = 0; i < QMP_FAKE_MAX_SLOTS; i++) {
+            slot_t *sl = &ep->slots[i];
+            if (sl->state == SLOT_RECEIVED && !sl->unblock_sent) {
+                sl->unblock_sent = true;
+                push_event(ep, QMP_RCV_UNBLOCK, sl->scoid, (int32_t)getpid(),
+                           make_rcvid(i, sl->gen));
+                rc = EOK;
+                break;
+            }
+        }
+    }
+    (void)pthread_mutex_unlock(&g_lock);
+    return rc;
 }
 
 #if !defined(__QNX__) /* on QNX: runtime/transport/qnx/qnx_transport.c */

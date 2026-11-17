@@ -39,6 +39,8 @@ int qmp_server_init(qmp_server_t *s, const qmp_server_cfg_t *cfg) {
     si->acl_check = cfg->acl_check;
     si->on_cancel = cfg->on_cancel;
     si->on_client_gone = cfg->on_client_gone;
+    si->listen_flags = cfg->listen_flags;
+    si->verbose = cfg->verbose != 0;
     int mrc = pthread_mutex_init(&si->pool_mu, NULL);
     if (mrc != 0) {
         return mrc;
@@ -80,7 +82,7 @@ int qmp_server_register(qmp_server_t *s, const qmp_service_desc_t *desc, uint16_
     if (rc != EOK) {
         return rc;
     }
-    rc = si->tr->listen(&si->ep, si->path);
+    rc = si->tr->listen(&si->ep, si->path, si->listen_flags);
     if (rc != EOK) {
         return rc;
     }
@@ -102,6 +104,7 @@ typedef struct worker_arg {
 static void worker_loop(qmp_server_impl_t *s, unsigned index) {
     uint8_t *rcv = s->workbuf + (size_t)index * 2U * s->max_msg_size;
     uint8_t *rep = rcv + s->max_msg_size;
+    qmp_inflight_t *infl = &s->inflight[index];
     for (;;) {
         qmp_rcv_info_t info;
         memset(&info, 0, sizeof(info));
@@ -114,7 +117,7 @@ static void worker_loop(qmp_server_impl_t *s, unsigned index) {
             continue;
         }
         if (info.kind == QMP_RCV_MESSAGE) {
-            qmp_server_dispatch(s, &info, rcv, info.msglen, rep, s->max_msg_size);
+            qmp_server_dispatch(s, &info, rcv, info.msglen, rep, s->max_msg_size, infl);
         } else if (info.kind == QMP_RCV_UNBLOCK) {
             qmp_server_on_unblock(s, info.rcvid);
         } else if (info.kind == QMP_RCV_DISCONNECT) {
@@ -131,6 +134,30 @@ static void *worker_main(void *arg) {
     return NULL;
 }
 
+/* Dedicated pulse thread: receives only lifecycle pulses (QNX: MsgReceivePulse) so
+ * UNBLOCK/DISCONNECT are served even when every worker is busy inside a handler
+ * (V-QNX-038). Runs at the caller's scheduling attributes, like the workers. */
+static void *pulse_main(void *arg) {
+    qmp_server_impl_t *s = (qmp_server_impl_t *)arg;
+    for (;;) {
+        qmp_rcv_info_t info;
+        memset(&info, 0, sizeof(info));
+        int rc = s->tr->receive_pulse(&s->ep, &info);
+        if (rc == ECANCELED) {
+            return NULL;
+        }
+        if (rc != EOK) {
+            qmp_log("receive_pulse failed: %d", rc);
+            continue;
+        }
+        if (info.kind == QMP_RCV_UNBLOCK) {
+            qmp_server_on_unblock(s, info.rcvid);
+        } else if (info.kind == QMP_RCV_DISCONNECT) {
+            qmp_server_on_disconnect(s, info.scoid, info.pid);
+        } /* other pulses: ignore */
+    }
+}
+
 int qmp_server_run(qmp_server_t *s) {
     if (s == NULL) {
         return EINVAL;
@@ -143,6 +170,14 @@ int qmp_server_run(qmp_server_t *s) {
         return EBUSY;
     }
     si->running = 1;
+    si->has_pulse_thr = 0;
+    if (si->tr->receive_pulse != NULL) {
+        if (pthread_create(&si->pulse_thread, NULL, pulse_main, si) == 0) {
+            si->has_pulse_thr = 1;
+        } else {
+            qmp_log("pulse thread create failed; pulses are served by idle workers only");
+        }
+    }
     worker_arg_t args[QMP_SERVER_MAX_THREADS];
     unsigned started = 0;
     for (unsigned i = 1; i < si->nthreads; i++) {
@@ -159,6 +194,10 @@ int qmp_server_run(qmp_server_t *s) {
     worker_loop(si, 0);
     for (unsigned i = 1; i <= started; i++) {
         (void)pthread_join(si->workers[i], NULL);
+    }
+    if (si->has_pulse_thr) {
+        (void)pthread_join(si->pulse_thread, NULL);
+        si->has_pulse_thr = 0;
     }
     si->running = 0;
     return EOK;

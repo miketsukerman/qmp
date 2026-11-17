@@ -2,10 +2,13 @@
 /*
  * Native QNX message-passing transport (DESIGN §1, §3).
  *
- * Server: name_attach() registers "qmp/<svc>-<inst>/v<major>" under /dev/name/local and
- * creates the channel itself. Per the SDP 8.0 docs the channel comes with
- * _NTO_CHF_UNBLOCK | _NTO_CHF_DISCONNECT | _NTO_CHF_COID_DISCONNECT set and priority
- * inheritance on (never _NTO_CHF_FIXED_PRIORITY). VERIFY(qnx8): V-QNX-023.
+ * Server: the channel is ALWAYS created by us (ChannelCreate), wrapped in a dispatch
+ * handle (dispatch_create_channel) and registered with name_attach() as
+ * "qmp/<svc>-<inst>/v<major>" under /dev/name/local. The flags are
+ * _NTO_CHF_UNBLOCK | _NTO_CHF_DISCONNECT | _NTO_CHF_COID_DISCONNECT — the same set
+ * name_attach() would have used (VERIFY(qnx8): V-QNX-023/V-QNX-039) — plus, only when
+ * QMP_LISTEN_FIXED_PRIORITY is requested (negative control for demos),
+ * _NTO_CHF_FIXED_PRIORITY. That flag is the ONLY difference between the two modes.
  *
  * Receive loop order (runtime-c.instructions.md):
  *   1. pulses (_PULSE_CODE_DISCONNECT, _PULSE_CODE_UNBLOCK, others)
@@ -13,6 +16,9 @@
  *   3. other _IO_* -> MsgError(ENOSYS)
  *   4. qmp messages -> returned to the core, which validates the header fully
  *   5. anything else -> MsgError(EINVAL)
+ *
+ * A dedicated core thread calls receive_pulse() (MsgReceivePulse) so UNBLOCK/DISCONNECT
+ * pulses are served even when every worker is busy inside a handler (V-QNX-038).
  *
  * Client: name_open() + MsgSendv with TimerTimeout(_NTO_TIMEOUT_SEND|_NTO_TIMEOUT_REPLY),
  * covering both the SEND-blocked and the REPLY-blocked state.
@@ -54,7 +60,9 @@ typedef struct cred_entry {
 
 typedef struct qnx_ep_impl {
     name_attach_t *attach;
+    dispatch_t *dpp;     /* wraps our own chid; see qnx_listen()/qnx_close()  */
     cred_entry_t *creds; /* QMP_QNX_CRED_CACHE entries, allocated in listen() */
+    int chid;            /* created by us with ChannelCreate                  */
     int self_coid;       /* side channel for the stop pulse                   */
     volatile unsigned stop;
     pthread_mutex_t cred_mu;
@@ -113,32 +121,60 @@ static int qnx_disconnect(qmp_conn_t *conn) {
 
 /* ---- server --------------------------------------------------------------- */
 
-static int qnx_listen(qmp_endpoint_t *ep_, const char *path) {
+static int qnx_listen(qmp_endpoint_t *ep_, const char *path, uint32_t flags) {
     qnx_ep_impl_t *e = (qnx_ep_impl_t *)(void *)ep_;
     memset(e, 0, sizeof(*e));
+    e->chid = -1;
+    e->self_coid = -1;
     e->creds = calloc(QMP_QNX_CRED_CACHE, sizeof(cred_entry_t)); /* init time only */
     if (e->creds == NULL) {
         return ENOMEM;
     }
     (void)pthread_mutex_init(&e->cred_mu, NULL);
+    /* Always create the channel ourselves so QMP_LISTEN_FIXED_PRIORITY is the single
+     * difference between the two modes; every flag name_attach() would have set stays.
+     * VERIFY(qnx8): V-QNX-039 — name_attach() over dispatch_create_channel() keeps our
+     * chid (attach->chid == chid) and sets no extra channel flags. */
+    unsigned cflags = _NTO_CHF_UNBLOCK | _NTO_CHF_DISCONNECT | _NTO_CHF_COID_DISCONNECT;
+    if ((flags & QMP_LISTEN_FIXED_PRIORITY) != 0) {
+        /* Negative control for priority-inheritance demos ONLY (V-QNX-041). */
+        cflags |= _NTO_CHF_FIXED_PRIORITY;
+    }
+    int err;
+    e->chid = ChannelCreate(cflags);
+    if (e->chid == -1) {
+        err = errno != 0 ? errno : EIO;
+        goto fail;
+    }
+    e->dpp = dispatch_create_channel(e->chid, 0);
+    if (e->dpp == NULL) {
+        err = errno != 0 ? errno : EIO;
+        goto fail;
+    }
     /* The flags argument is documented as unused for local attach in 8.0. */
-    e->attach = name_attach(NULL, path, 0);
+    e->attach = name_attach(e->dpp, path, 0);
     if (e->attach == NULL) {
-        int err = errno != 0 ? errno : EADDRINUSE;
-        free(e->creds);
-        e->creds = NULL;
-        return err;
+        err = errno != 0 ? errno : EADDRINUSE;
+        goto fail;
     }
     e->self_coid = ConnectAttach(0, 0, e->attach->chid, _NTO_SIDE_CHANNEL, 0);
     if (e->self_coid == -1) {
-        int err = errno != 0 ? errno : EIO;
+        err = errno != 0 ? errno : EIO;
         (void)name_detach(e->attach, 0);
         e->attach = NULL;
-        free(e->creds);
-        e->creds = NULL;
-        return err;
+        e->chid = -1; /* name_detach destroyed the channel (V-QNX-040) */
+        goto fail;
     }
     return EOK;
+fail:
+    if (e->chid != -1) {
+        (void)ChannelDestroy(e->chid);
+        e->chid = -1;
+    }
+    e->dpp = NULL;
+    free(e->creds);
+    e->creds = NULL;
+    return err;
 }
 
 /* ConnectClientInfo is called once per scoid, then served from the cache. It uses
@@ -198,6 +234,39 @@ static int32_t qnx_drop_creds(qnx_ep_impl_t *e, int32_t scoid) {
     return pid;
 }
 
+/* Shared pulse handling for qnx_receive() and qnx_receive_pulse(). Returns EOK with
+ * *info filled, or ECANCELED on the internal stop pulse. */
+static int qnx_handle_pulse(qnx_ep_impl_t *e, const struct _pulse *p, qmp_rcv_info_t *info) {
+    switch (p->code) {
+    case _PULSE_CODE_DISCONNECT:
+        /* Once per client process when its last connection goes (V-QNX-004).
+         * ConnectDetach here; the core releases its per-process state. */
+        info->kind = QMP_RCV_DISCONNECT;
+        info->scoid = p->scoid;
+        info->pid = qnx_drop_creds(e, p->scoid);
+        (void)ConnectDetach(p->scoid);
+        return EOK;
+    case _PULSE_CODE_UNBLOCK:
+        /* The pulse value carries the rcvid of the blocked client (64-bit).
+         * VERIFY(qnx8): V-QNX-031 — sigval member holding it on 8.0. */
+        info->kind = QMP_RCV_UNBLOCK;
+        info->rcvid = (int64_t)(intptr_t)p->value.sival_ptr;
+        info->scoid = p->scoid;
+        return EOK;
+    case QMP_QNX_PULSE_STOP:
+        /* Daisy-chain so every receiver (workers and pulse thread) wakes up. */
+        e->stop = 1;
+        (void)MsgSendPulse(e->self_coid, -1, QMP_QNX_PULSE_STOP, 0);
+        return ECANCELED;
+    default:
+        info->kind = QMP_RCV_PULSE;
+        info->pulse_code = p->code;
+        info->pulse_value = (int64_t)(intptr_t)p->value.sival_ptr;
+        info->scoid = p->scoid;
+        return EOK;
+    }
+}
+
 static int qnx_receive(qmp_endpoint_t *ep_, void *buf, size_t cap, qmp_rcv_info_t *info) {
     qnx_ep_impl_t *e = (qnx_ep_impl_t *)(void *)ep_;
     if (cap < sizeof(struct _pulse) || cap < sizeof(uint16_t)) {
@@ -222,35 +291,7 @@ static int qnx_receive(qmp_endpoint_t *ep_, void *buf, size_t cap, qmp_rcv_info_
         memset(info, 0, sizeof(*info));
         if (rcvid == 0) {
             /* 1. Pulses. Values are 64 bits in 8.0; never truncate. */
-            const struct _pulse *p = (const struct _pulse *)buf;
-            switch (p->code) {
-            case _PULSE_CODE_DISCONNECT:
-                /* Once per client process when its last connection goes (V-QNX-004).
-                 * ConnectDetach here; the core releases its per-process state. */
-                info->kind = QMP_RCV_DISCONNECT;
-                info->scoid = p->scoid;
-                info->pid = qnx_drop_creds(e, p->scoid);
-                (void)ConnectDetach(p->scoid);
-                return EOK;
-            case _PULSE_CODE_UNBLOCK:
-                /* The pulse value carries the rcvid of the blocked client (64-bit).
-                 * VERIFY(qnx8): V-QNX-031 — sigval member holding it on 8.0. */
-                info->kind = QMP_RCV_UNBLOCK;
-                info->rcvid = (int64_t)(intptr_t)p->value.sival_ptr;
-                info->scoid = p->scoid;
-                return EOK;
-            case QMP_QNX_PULSE_STOP:
-                /* Daisy-chain so every worker blocked in MsgReceive wakes up. */
-                e->stop = 1;
-                (void)MsgSendPulse(e->self_coid, -1, QMP_QNX_PULSE_STOP, 0);
-                return ECANCELED;
-            default:
-                info->kind = QMP_RCV_PULSE;
-                info->pulse_code = p->code;
-                info->pulse_value = (int64_t)(intptr_t)p->value.sival_ptr;
-                info->scoid = p->scoid;
-                return EOK;
-            }
+            return qnx_handle_pulse(e, (const struct _pulse *)buf, info);
         }
         uint16_t type;
         if (mi.msglen < (int64_t)sizeof(type)) {
@@ -287,6 +328,46 @@ static int qnx_receive(qmp_endpoint_t *ep_, void *buf, size_t cap, qmp_rcv_info_
         qnx_fill_creds(e, mi.scoid, info);
         return EOK;
     }
+}
+
+/* Pulse-only receive for the core's dedicated pulse thread. MsgReceivePulse() never
+ * consumes a message, so client sends stay queued for the MsgReceive workers while
+ * UNBLOCK/DISCONNECT pulses are served even when all workers are busy.
+ * VERIFY(qnx8): V-QNX-038 — pulse routing between MsgReceive- and MsgReceivePulse-blocked
+ * threads on one channel. */
+static int qnx_receive_pulse(qmp_endpoint_t *ep_, qmp_rcv_info_t *info) {
+    qnx_ep_impl_t *e = (qnx_ep_impl_t *)(void *)ep_;
+    for (;;) {
+        if (e->stop != 0) {
+            return ECANCELED;
+        }
+        struct _pulse p;
+        memset(&p, 0, sizeof(p));
+        if (MsgReceivePulse(e->attach->chid, &p, sizeof(p), NULL) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == ESRCH) {
+                return ECANCELED; /* channel destroyed under us */
+            }
+            return errno != 0 ? errno : EIO;
+        }
+        memset(info, 0, sizeof(*info));
+        return qnx_handle_pulse(e, &p, info);
+    }
+}
+
+/* Is the client blocked on rcvid still asking to be unblocked? Defeats stale pulses: a
+ * reused rcvid whose client wants its reply reports no unblock request, so it is never
+ * cancelled by an old pulse. VERIFY(qnx8): V-QNX-037 — _NTO_MI_UNBLOCK_REQ semantics. */
+static int qnx_unblock_req(qmp_endpoint_t *ep_, int64_t rcvid) {
+    (void)ep_;
+    struct _msg_info mi;
+    memset(&mi, 0, sizeof(mi));
+    if (MsgInfo((rcvid_t)rcvid, &mi) == -1) {
+        return 0; /* rcvid gone: nothing left to cancel */
+    }
+    return (mi.flags & _NTO_MI_UNBLOCK_REQ) != 0;
 }
 
 static int qnx_reply(qmp_endpoint_t *ep_, int64_t rcvid, const qmp_iov_t *iov, int parts) {
@@ -328,10 +409,16 @@ static int qnx_close(qmp_endpoint_t *ep_) {
         e->self_coid = -1;
     }
     if (e->attach != NULL) {
+        /* VERIFY(qnx8): V-QNX-040 — name_detach(attach, 0) removes the name and destroys
+         * the channel, including one we supplied via dispatch_create_channel(). The
+         * dispatch handle itself is intentionally not freed: close happens once per
+         * process lifetime and dispatch has no documented channel-preserving destroy. */
         if (name_detach(e->attach, 0) == -1) {
             rc = errno != 0 ? errno : EIO;
         }
         e->attach = NULL;
+        e->dpp = NULL;
+        e->chid = -1;
     }
     (void)pthread_mutex_destroy(&e->cred_mu);
     free(e->creds);
@@ -340,8 +427,8 @@ static int qnx_close(qmp_endpoint_t *ep_) {
 }
 
 static const qmp_transport_t g_qnx = {
-    "qnx",       qnx_connect, qnx_call,  qnx_disconnect, qnx_listen,
-    qnx_receive, qnx_reply,   qnx_error, qnx_unblock,    qnx_close,
+    "qnx",     qnx_connect, qnx_call,    qnx_disconnect, qnx_listen,        qnx_receive,
+    qnx_reply, qnx_error,   qnx_unblock, qnx_close,      qnx_receive_pulse, qnx_unblock_req,
 };
 
 const qmp_transport_t *qmp_transport_qnx(void) {

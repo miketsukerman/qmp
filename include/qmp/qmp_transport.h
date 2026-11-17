@@ -22,7 +22,7 @@ typedef struct qmp_iov {
 } qmp_iov_t;
 
 #define QMP_CONN_STORAGE_U64     8
-#define QMP_ENDPOINT_STORAGE_U64 8
+#define QMP_ENDPOINT_STORAGE_U64 16
 
 /* Caller-provided opaque storage for one client connection. */
 typedef struct qmp_conn {
@@ -59,6 +59,14 @@ typedef struct qmp_rcv_info {
     uint32_t _pad0;
 } qmp_rcv_info_t;
 
+/* listen() flags. */
+enum qmp_listen_flags {
+    /* Negative control for priority-inheritance demos: create the channel with a fixed
+     * priority (QNX: _NTO_CHF_FIXED_PRIORITY). NEVER use on production service channels
+     * (runtime-c rules); every other channel flag stays identical to the default mode. */
+    QMP_LISTEN_FIXED_PRIORITY = 1U << 0,
+};
+
 typedef struct qmp_transport {
     const char *name;
 
@@ -71,7 +79,7 @@ typedef struct qmp_transport {
     int (*disconnect)(qmp_conn_t *conn);
 
     /* -- server side -- */
-    int (*listen)(qmp_endpoint_t *ep, const char *path);
+    int (*listen)(qmp_endpoint_t *ep, const char *path, uint32_t flags);
     /* Blocks until a message or lifecycle event arrives. Returns EOK, or ECANCELED after
      * unblock(). The buffer is the worker's preallocated receive buffer. */
     int (*receive)(qmp_endpoint_t *ep, void *buf, size_t cap, qmp_rcv_info_t *info);
@@ -80,10 +88,25 @@ typedef struct qmp_transport {
     /* Wake every thread blocked in receive() so qmp_server_run() can return. */
     int (*unblock)(qmp_endpoint_t *ep);
     int (*close)(qmp_endpoint_t *ep);
+
+    /* Optional (NULL = not provided). Blocks until a lifecycle event / pulse arrives and
+     * never consumes messages (QNX: MsgReceivePulse). Lets the core run a dedicated pulse
+     * thread so UNBLOCK/DISCONNECT are served even when every worker is busy in a handler.
+     * Returns EOK with info->kind in {UNBLOCK, DISCONNECT, PULSE}, or ECANCELED after
+     * unblock(). */
+    int (*receive_pulse)(qmp_endpoint_t *ep, qmp_rcv_info_t *info);
+    /* Optional (NULL = assume 1). Returns 1 when the client blocked on rcvid is currently
+     * asking to be unblocked (QNX: MsgInfo _NTO_MI_UNBLOCK_REQ), 0 when it is not (stale
+     * pulse, or the rcvid is gone/reused by a client that still wants the reply). */
+    int (*unblock_req)(qmp_endpoint_t *ep, int64_t rcvid);
 } qmp_transport_t;
 
 /* In-process transport for unit tests (runtime/transport/fake). Thread-safe. */
 const qmp_transport_t *qmp_transport_fake(void);
+/* Test-only (fake transport): simulate a signal hitting a client that is REPLY-blocked on
+ * the endpoint at `path` (kernel unblock pulse without the client's deadline passing).
+ * Returns EOK, or ESRCH when no client is currently REPLY-blocked there. */
+int qmp_transport_fake_unblock_inject(const char *path);
 /* Native QNX message passing (runtime/transport/qnx). Only defined on __QNX__. */
 const qmp_transport_t *qmp_transport_qnx(void);
 /* qnx on __QNX__; fake on the host until the uds transport lands (W3). */

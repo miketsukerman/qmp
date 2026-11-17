@@ -281,7 +281,8 @@ TEST_F(Lifecycle, ClientTimeoutCancelsAParkedRequest) {
     int32_t st = 0;
     qmp_call_opts_t opts{};
     opts.timeout_ns = 20ull * 1000 * 1000;
-    // REPLY-blocked timeout: unblock pulse -> on_cancel -> MsgError(ETIMEDOUT).
+    // REPLY-blocked timeout: unblock pulse -> on_cancel -> MsgError(ECANCELED), which the
+    // client maps to ETIMEDOUT because its own deadline has passed (DESIGN §3.8).
     EXPECT_EQ(qmp_client_call(&c, kMEcho, &in, sizeof(in), &out, sizeof(out), &st, &opts),
               ETIMEDOUT);
     EXPECT_EQ(model_.cancels.load(), 1);

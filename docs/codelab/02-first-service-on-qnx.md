@@ -134,4 +134,4 @@ Each prints `PASS`/`FAIL`; the script exits non-zero on any failure.
   milestone added) — if the Pi disagrees with a stated assumption, that register is where it
   gets recorded.
 
-**Next:** Codelab 03 — topics: notify-then-pull with `MsgDeliverEvent` (later milestone).
+**Next:** [Codelab 03 — topics: notify-then-pull with `MsgDeliverEvent`](03-topics-notify-then-pull.md).

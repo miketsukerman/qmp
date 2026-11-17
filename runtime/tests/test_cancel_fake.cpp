@@ -33,6 +33,26 @@ struct EchoOut {
     uint8_t _pad[4];
 };
 
+using Clock = std::chrono::steady_clock;
+using std::chrono::milliseconds;
+
+// Handlers give up after this long so a regression fails instead of hanging. It is a wall
+// clock deadline, not an iteration count: sleep_for(1ms) rounds up to the next tick (about
+// 2 ms on QNX), which would silently double an iteration-based cap.
+constexpr milliseconds kHandlerCap{5000};
+
+// Polls pred every millisecond until it holds or `limit` elapses; returns the last value.
+template <typename Pred> bool wait_until(Pred pred, milliseconds limit = kHandlerCap) {
+    const auto deadline = Clock::now() + limit;
+    while (!pred()) {
+        if (Clock::now() >= deadline) {
+            return pred();
+        }
+        std::this_thread::sleep_for(milliseconds(1));
+    }
+    return true;
+}
+
 struct Model {
     std::atomic<int> slow_running{0};
     std::atomic<int> slow_canceled{0};  // handler observed qmp_req_canceled() == 1
@@ -61,7 +81,8 @@ int slow_handler(const void *, void *ctx, qmp_req_t *req, const void *in, void *
     m->last_rcvid = reinterpret_cast<qmp_req_impl_t *>(req)->rcvid;
     m->last_scoid = info.scoid;
     m->slow_running++;
-    for (int i = 0; i < 5000; i++) { // 5 s cap so a regression fails instead of hanging
+    const auto deadline = Clock::now() + kHandlerCap;
+    while (Clock::now() < deadline) {
         if (qmp_req_canceled(req)) {
             m->slow_canceled++;
             // The result is written anyway: dispatch must discard it, not reply with it.
@@ -71,7 +92,7 @@ int slow_handler(const void *, void *ctx, qmp_req_t *req, const void *in, void *
         if (m->release) {
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(milliseconds(1));
     }
     static_cast<EchoOut *>(out)->value = static_cast<const EchoIn *>(in)->value + 1;
     *st = 0;
@@ -85,9 +106,7 @@ int block_handler(const void *, void *ctx, qmp_req_t *req, const void *in, void 
     EXPECT_EQ(qmp_req_get_info(req, &info), EOK);
     m->last_scoid = info.scoid;
     m->block_running++;
-    for (int i = 0; i < 5000 && !m->release; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    (void)wait_until([m] { return m->release.load(); });
     static_cast<EchoOut *>(out)->value = static_cast<const EchoIn *>(in)->value + 1;
     *st = 0;
     m->block_completed++;
@@ -179,9 +198,7 @@ TEST_F(Cancel, TimeoutCancelsARunningHandlerAndDiscardsItsResult) {
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
             .count();
     EXPECT_LT(ms, 1000); // returned near the timeout, not after the handler's 5 s cap
-    for (int i = 0; i < 5000 && model_.slow_canceled.load() == 0; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    (void)wait_until([&] { return model_.slow_canceled.load() != 0; });
     EXPECT_EQ(model_.slow_canceled.load(), 1); // the handler saw qmp_req_canceled()
     EXPECT_EQ(model_.slow_completed.load(), 0);
     EXPECT_EQ(model_.cancels.load(), 0); // on_cancel is for parked requests only
@@ -195,25 +212,39 @@ TEST_F(Cancel, TimeoutCancelsARunningHandlerAndDiscardsItsResult) {
 
 TEST_F(Cancel, PulsesAreServedWhileEveryWorkerIsBusy) {
     // Both workers run Slow handlers that only return once cancelled; without the dedicated
-    // pulse thread nobody could receive the unblock pulses and this test would hang.
+    // pulse thread nobody could receive the unblock pulses and both clients would stay
+    // REPLY-blocked until the handlers' 5 s cap. Each client therefore checks its OWN
+    // elapsed time against its timeout: returning late means the pulses were not served.
+    constexpr auto kTimeout = milliseconds(50);
+    constexpr auto kSlack = milliseconds(450); // scheduling noise, sanitizers, QNX ticks
     qmp_client_t c1;
     qmp_client_t c2;
     connect(c1);
     connect(c2);
-    for (int i = 0; i < 5000 && model_.slow_running.load() < 1; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
     int rc1 = -1;
     int rc2 = -1;
-    std::thread t1([&] { rc1 = call(c1, kMSlow, 50 * kMs); });
-    std::thread t2([&] { rc2 = call(c2, kMSlow, 50 * kMs); });
+    Clock::duration dt1{};
+    Clock::duration dt2{};
+    auto timed_call = [&](qmp_client_t &c, int &rc, Clock::duration &dt) {
+        const auto t0 = Clock::now();
+        rc = call(c, kMSlow, static_cast<uint64_t>(kTimeout.count()) * kMs);
+        dt = Clock::now() - t0;
+    };
+    std::thread t1([&] { timed_call(c1, rc1, dt1); });
+    std::thread t2([&] { timed_call(c2, rc2, dt2); });
     t1.join();
     t2.join();
     EXPECT_EQ(rc1, ETIMEDOUT);
     EXPECT_EQ(rc2, ETIMEDOUT);
-    for (int i = 0; i < 5000 && model_.slow_canceled.load() < 2; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    for (const auto dt : {dt1, dt2}) {
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(dt).count();
+        // Lower bound with 1 ms of clock-granularity slack: the call must not give up early.
+        EXPECT_GE(us, std::chrono::microseconds(kTimeout - milliseconds(1)).count());
+        EXPECT_LT(us, std::chrono::microseconds(kTimeout + kSlack).count());
     }
+    // Both handlers poll qmp_req_canceled() every millisecond, so they exit promptly and
+    // TearDown does not wait for the cap.
+    EXPECT_TRUE(wait_until([&] { return model_.slow_canceled.load() >= 2; }));
     EXPECT_EQ(model_.slow_canceled.load(), 2);
     EXPECT_EQ(model_.slow_completed.load(), 0);
     qmp_client_close(&c1);
@@ -244,16 +275,12 @@ TEST_F(Cancel, SignalUnblockReturnsECANCELEDNotETIMEDOUT) {
     connect(c);
     int rc = -1;
     std::thread t([&] { rc = call(c, kMSlow, 0); });
-    for (int i = 0; i < 5000 && model_.slow_running.load() == 0; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    (void)wait_until([&] { return model_.slow_running.load() != 0; });
     ASSERT_EQ(model_.slow_running.load(), 1);
     ASSERT_EQ(qmp_transport_fake_unblock_inject(impl()->path), EOK);
     t.join();
     EXPECT_EQ(rc, ECANCELED);
-    for (int i = 0; i < 5000 && model_.slow_canceled.load() == 0; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    (void)wait_until([&] { return model_.slow_canceled.load() != 0; });
     EXPECT_EQ(model_.slow_canceled.load(), 1);
     qmp_client_close(&c);
 }
@@ -268,14 +295,10 @@ TEST_F(Cancel, DisconnectDuringARunningHandlerDiscardsTheLateResult) {
     EXPECT_EQ(model_.block_running.load(), 1);
     EXPECT_EQ(model_.block_completed.load(), 0); // still inside the handler
     qmp_client_close(&a);
-    for (int i = 0; i < 5000 && model_.clients_gone.load() == 0; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    (void)wait_until([&] { return model_.clients_gone.load() != 0; });
     EXPECT_GE(model_.clients_gone.load(), 1);
     model_.release = true;
-    for (int i = 0; i < 5000 && model_.block_completed.load() == 0; i++) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    (void)wait_until([&] { return model_.block_completed.load() != 0; });
     EXPECT_EQ(model_.block_completed.load(), 1);
     qmp_client_t b;
     connect(b);

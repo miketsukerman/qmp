@@ -75,7 +75,7 @@ priority-inheriting `MsgSend`, so a high-priority subscriber is served first. âˆ
 (pulse + pull) per delivered sample instead of one; measured in W4. âˆ’ A large sample still costs
 one copy per subscriber; shm handles (stretch) address bulk data.
 
-**Amendment (2026-12, W3 implementation).** Three details changed when the design met the
+**Amendment (2026-11, W2 implementation).** Three details changed when the design met the
 kernel API:
 
 1. *Event blob, not handle.* 8.0's `MsgRegisterEvent(&ev, coid)` rewrites the `sigevent`

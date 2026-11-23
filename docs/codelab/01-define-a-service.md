@@ -236,7 +236,7 @@ joint_service: demo.joint.Joint listening on qmp/0101-0000/v1
 selftest: seq=1 position=0.50 mode=hold
 ```
 
-On QNX (W2) the same binaries use `name_attach`/`MsgSendv`; the fake transport is only a host
+On QNX the same binaries use `name_attach`/`MsgSendv`; the fake transport is only a host
 stand-in with the same blocking semantics (send-blocked client, receive-blocked workers).
 
 ## 6. Sidebar: the same service from C++17
@@ -294,7 +294,7 @@ struct JointServer {
 };
 ```
 
-The generated `*.qmp.hpp` (W2) will ship exactly this kind of wrapper (`qmp::Result<T>`, RAII
+The generated `*.qmp.hpp` (planned, W3) will ship exactly this kind of wrapper (`qmp::Result<T>`, RAII
 client/server, virtual-method service base) so you don't write it yourself; the C structs stay
 the single source of truth. Rules: C++17 only, no exceptions, no RTTI, header-only.
 
@@ -307,4 +307,4 @@ the single source of truth. Rules: C++17 only, no exceptions, no RTTI, header-on
   transport errors are errnos.
 * Everything is caller-allocated; nothing on the call path allocates.
 
-**Next:** Codelab 02 — deferred replies, one-way methods and topics on real QNX hardware.
+**Next:** [Codelab 02 — first service on QNX: from a .proto to a running Pi](02-first-service-on-qnx.md).

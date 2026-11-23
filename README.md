@@ -60,16 +60,18 @@ caller's priority (inherited through `MsgSend`); the server never sends to a
 client, so topics use notify-then-pull over registered events. The same core
 also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
 only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
-## Status (W1)
+
+## Status (W2)
 
 | Area | State |
 |------|-------|
-| `protoc-gen-qmp` | sync methods: validated schema → C11 layouts with static asserts, ids, UUri constants, client stubs, ops table, reflection JSON |
-| `libqmp` core | header codec, UCode mapping, dispatch, version handshake, caller-provided storage |
-| transports | `fake` (in-process, host tests). QNX native: W2. UDS (bench only): W3 |
-| tests | 36 GoogleTest cases (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
-| deferred reply, one-way, topics, lifecycle, access control | W2–W3 |
-| qmpctl, bench, uProtocol adapter | W3–W4 |
+| `protoc-gen-qmp` | sync methods: validated schema → C11 layouts with static asserts, ids, UUri constants, client stubs, ops table, reflection JSON. C++17 wrappers (`*.qmp.hpp`) and secpol emitter: not yet |
+| `libqmp` core | header codec, UCode mapping, dispatch, version handshake, caller-provided storage; deferred replies (fixed pool), one-way calls, client timeouts with in-flight cancellation, disconnect/server-death lifecycle with reconnect, `acl_check` hook on kernel credentials; topics (notify-then-pull, LATEST/QUEUE with loss accounting, resubscribe on restart) |
+| transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events). UDS (bench only): W3 |
+| examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
+| tests | 64 GoogleTest cases + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
+| on target | cross-build and smoke scenarios scripted; no target results recorded in [docs/VERIFY.md](docs/VERIFY.md) yet |
+| next | qmpctl, UDS transport, C++ wrappers (W3); bench, secpol generation, uProtocol adapter (W4, adapter is stretch) |
 
 ## Build from a clean machine (Ubuntu 24.04, host build)
 
@@ -89,7 +91,7 @@ ctest --test-dir build/host-debug --output-on-failure
 Expected tail of the `ctest` output:
 
 ```
-100% tests passed, 0 tests failed out of 36
+100% tests passed, 0 tests failed out of 65
 ```
 
 Generated bindings for the example service land in `build/host-debug/gen/joint/`
@@ -106,7 +108,7 @@ cd ..
 clang-format --dry-run -Werror $(git ls-files 'include/**/*.h' 'runtime/**/*.[ch]' 'runtime/**/*.cpp' 'examples/**/*.c')
 clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c
 cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability --std=c11 \
-         -Iinclude runtime/core runtime/transport/fake examples/joint_demo/joint_service.c
+         -Iinclude runtime/core runtime/transport/fake examples/joint_demo/joint_server.c
 ```
 
 Regenerate goldens on purpose only: `UPDATE_GOLDEN=1 python3 -m pytest tests -q`, then review
@@ -117,7 +119,7 @@ the diff.
 ```sh
 protoc -I third_party/up-spec/up-core-api -I idl \
        --plugin=protoc-gen-qmp=$(which protoc-gen-qmp) \
-       --qmp_out=flat:/tmp/gen examples/demo/joint/v1/joint.proto
+       --qmp_out=flat:/tmp/gen idl/examples/demo/joint/v1/joint.proto
 ```
 
 In CMake, `qmp_add_service(NAME joint PROTO idl/examples/demo/joint/v1/joint.proto)` does the
@@ -139,14 +141,19 @@ cmake --build build/qnx-aarch64le
 # x86_64 (QEMU): cmake --preset qnx-x86_64
 ```
 
-The QNX native transport (`runtime/transport/qnx/`) arrives in W2; until then the target build
-produces the core library and generated bindings only. Copy and run tests with
-`scripts/target-run.sh` (set `QMP_TARGET` to the board's SSH address first):
+On QNX the runtime links the native transport (`runtime/transport/qnx/`); the target build
+produces the core tests, `qmp_joint_server`/`qmp_joint_client` and `qmp_smoke`. Set
+`QMP_TARGET` to the board's SSH address, then copy and run one binary with
+`scripts/target-run.sh`, or run every two-process scenario (timeouts, client/server death,
+priority inheritance, cancellation, topics) with `scripts/target-smoke.sh`:
 
 ```sh
 export QMP_TARGET=qnxuser@<pi5-address>
 scripts/target-run.sh runtime/tests/qmp_core_tests
+scripts/target-smoke.sh
 ```
+
+Walkthrough: [Codelab 02](docs/codelab/02-first-service-on-qnx.md).
 
 Sanitizers on target: `-DQMP_SANITIZER=ubsan` (asan needs the shared runtime; no tsan on QNX —
 use the host tsan preset).
@@ -159,8 +166,12 @@ third_party/up-spec/  pinned uProtocol protos (v1.5.8, Apache-2.0) — see PIN.m
 codegen/              protoc-gen-qmp (Python ≥ 3.10, Jinja2) + golden tests
 include/qmp/          public C ABI headers
 runtime/core/         libqmp, OS-independent C11
-runtime/transport/    fake (W1), qnx (W2), uds (W3, bench only)
-examples/joint_demo/  actuator service in C (--selftest on host)
+runtime/transport/    fake (host tests), qnx (target), uds (W3, bench only)
+runtime/tests/        GoogleTest suites over the fake transport
+examples/joint_demo/  qmp_joint_server / qmp_joint_client: Joint actuator service in C
+                      (--selftest on host; publisher/subscriber modes for topics)
+examples/smoke/       qmp_smoke: hand-written service for target edge-case scenarios
+scripts/              target-run.sh, target-smoke.sh (SSH to the QNX board)
 cmake/                presets support, qnx-*.cmake toolchains, QmpCodegen.cmake
 docs/                 DESIGN, DECISIONS (ADRs), VERIFY register, codelab, spikes
 ```

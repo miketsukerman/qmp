@@ -69,8 +69,8 @@ only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 | `libqmp` core | header codec, UCode mapping, dispatch, version handshake, caller-provided storage; deferred replies (fixed pool), one-way calls, client timeouts with in-flight cancellation, disconnect/server-death lifecycle with reconnect, `acl_check` hook on kernel credentials; topics (notify-then-pull, LATEST/QUEUE with loss accounting, resubscribe on restart) |
 | transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events). UDS (bench only): W3 |
 | examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
-| tests | 64 GoogleTest cases + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
-| on target | cross-build and smoke scenarios scripted; no target results recorded in [docs/VERIFY.md](docs/VERIFY.md) yet |
+| tests | 65 GoogleTest cases + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
+| on target | RPi5, build `fdf940c957a9` (2026-11-26): 65/65 GoogleTest cases, 18/18 `scripts/target-smoke.sh` scenarios; results recorded in [docs/VERIFY.md](docs/VERIFY.md) (7 confirmed, 5 partially) |
 | next | qmpctl, UDS transport, C++ wrappers (W3); bench, secpol generation, uProtocol adapter (W4, adapter is stretch) |
 
 ## Build from a clean machine (Ubuntu 24.04, host build)
@@ -91,7 +91,7 @@ ctest --test-dir build/host-debug --output-on-failure
 Expected tail of the `ctest` output:
 
 ```
-100% tests passed, 0 tests failed out of 65
+100% tests passed, 0 tests failed out of 66
 ```
 
 Generated bindings for the example service land in `build/host-debug/gen/joint/`

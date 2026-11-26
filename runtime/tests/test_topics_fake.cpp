@@ -443,6 +443,43 @@ TEST_F(TopicsQueue, UnsubscribeRacesAPublisher) {
     EXPECT_EQ(qmp_client_close(&c), EOK);
 }
 
+/* A publisher faster than the pull round trip must not trap the subscriber inside
+ * qmp_client_poll(). The callback publishes a fresh sample on every delivery, so
+ * "remaining" never drops to zero; poll must stop at the sequence that was newest when
+ * it started, and the next poll must still see the newer samples (their pulses are
+ * pending). Before the fix this looped until the cap and the first poll saw 50. */
+TEST_F(TopicsQueue, PollReturnsWhilePublisherOutpacesTheDrain) {
+    qmp_client_t c;
+    connect(c);
+    struct Ctx {
+        qmp_server_t *srv;
+        std::vector<QUpdate> got;
+        uint64_t next;
+    } ctx{&server_, {}, 2};
+    auto cb = [](void *p, const void *sample, uint32_t len, uint64_t seq, uint64_t dropped) {
+        auto *x = static_cast<Ctx *>(p);
+        record_q(&x->got, sample, len, seq, dropped);
+        if (x->next < 50) {
+            ++x->next;
+            QSample s{x->next, x->next * 2};
+            EXPECT_EQ(qmp_server_publish(x->srv, kQTopic, &s, sizeof(s)), EOK);
+        }
+    };
+    alignas(8) QSample buf{};
+    qmp_sub_t sub{};
+    ASSERT_EQ(qmp_client_subscribe(&c, kQTopic, &buf, sizeof(buf), cb, &ctx, &sub), EOK);
+    ASSERT_EQ(publish_q(1), EOK);
+    ASSERT_EQ(publish_q(2), EOK);
+    ASSERT_EQ(qmp_client_poll(&c, kShortMs), EOK);
+    ASSERT_EQ(ctx.got.size(), 2U); /* seq 1..2 existed at the first pull; 3, 4 came later */
+    EXPECT_EQ(ctx.got.back().s.a, 2U);
+    ASSERT_EQ(qmp_client_poll(&c, kShortMs), EOK); /* the pulse for seq 3 is pending */
+    ASSERT_GE(ctx.got.size(), 3U);
+    EXPECT_EQ(ctx.got[2].s.a, 3U);
+    EXPECT_EQ(qmp_client_unsubscribe(&c, &sub), EOK);
+    EXPECT_EQ(qmp_client_close(&c), EOK);
+}
+
 TEST_F(TopicsQueue, UnknownTopicIsRejected) {
     qmp_client_t c;
     connect(c);

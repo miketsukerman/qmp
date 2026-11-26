@@ -215,6 +215,12 @@ static int pull_once(qmp_client_impl_t *ci, qmp_sub_impl_t *sub, qmp_pull_reply_
 
 /* Pull a subscription dry, running the callback per sample in sequence order. */
 static int drain_sub(qmp_client_impl_t *ci, qmp_sub_impl_t *sub) {
+    /* Drain up to the newest sequence that existed at the first pull, never "until
+     * remaining == 0": a publisher faster than one pull round trip would keep remaining
+     * above zero and this loop (and qmp_client_poll) would never return. Anything newer
+     * was published after notify_wait consumed our wake-up, so its own pulse is already
+     * queued (or the pulse queue is full of earlier ones) and the next poll drains it. */
+    uint64_t target = 0;
     for (;;) {
         qmp_pull_reply_t pr;
         uint32_t slen = 0;
@@ -229,7 +235,10 @@ static int drain_sub(qmp_client_impl_t *ci, qmp_sub_impl_t *sub) {
         if (sub->cb != NULL) {
             sub->cb(sub->cb_ctx, sub->buf, slen, pr.seq, pr.dropped);
         }
-        if (pr.remaining == 0) {
+        if (target == 0) {
+            target = pr.seq + pr.remaining;
+        }
+        if (pr.remaining == 0 || pr.seq >= target) {
             return EOK;
         }
     }

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Server lifecycle and worker threads (DESIGN §5.1). */
+#include <sched.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <time.h>
@@ -128,6 +129,23 @@ int qmp_server_register(qmp_server_t *s, const qmp_service_desc_t *desc, uint16_
     return EOK;
 }
 
+void qmp_worker_restore_priority(const qmp_inflight_t *infl) {
+    if (infl == NULL || infl->base_prio == 0) {
+        return;
+    }
+    struct sched_param sp;
+    int policy = 0;
+    if (pthread_getschedparam(pthread_self(), &policy, &sp) != 0 ||
+        sp.sched_priority == (int)infl->base_prio) {
+        return;
+    }
+    memset(&sp, 0, sizeof(sp));
+    sp.sched_priority = (int)infl->base_prio;
+    /* Best effort: lowering is always allowed; raising back (a caller below the base) can
+     * be refused without privileges, and then the handler simply runs at that priority. */
+    (void)pthread_setschedparam(pthread_self(), (int)infl->base_policy, &sp);
+}
+
 typedef struct worker_arg {
     qmp_server_impl_t *s;
     unsigned index;
@@ -137,6 +155,14 @@ static void worker_loop(qmp_server_impl_t *s, unsigned index) {
     uint8_t *rcv = s->workbuf + (size_t)index * 2U * s->max_msg_size;
     uint8_t *rep = rcv + s->max_msg_size;
     qmp_inflight_t *infl = &s->inflight[index];
+    struct sched_param sp;
+    int policy = 0;
+    infl->base_prio = 0;
+    if (pthread_getschedparam(pthread_self(), &policy, &sp) == 0 && sp.sched_priority > 0 &&
+        sp.sched_priority <= UINT8_MAX && policy >= 0 && policy <= UINT8_MAX) {
+        infl->base_prio = (uint8_t)sp.sched_priority;
+        infl->base_policy = (uint8_t)policy;
+    }
     for (;;) {
         qmp_rcv_info_t info;
         memset(&info, 0, sizeof(info));

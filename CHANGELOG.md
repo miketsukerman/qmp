@@ -28,6 +28,11 @@ Wire version 1 · reflection version 1
   handler runs at the worker's base priority after the caller was released (V-QNX-011),
   and the `qmpctl` call scenario sends `Stop`.
 
+### Fixed
+- A one-way handler now runs at the worker's own priority. On QNX 8 a receiving thread
+  keeps the sender's priority after the reply until its next receive (measured on the
+  RPi5, V-QNX-011), so the runtime restores the worker's priority after the receipt reply.
+
 ### Changed
 - The ops-table member of a one-way method that has a request payload now receives it:
   `int (*M)(void *ctx, const qmp_req_info_t *info, const <Request> *in)`. No such handler

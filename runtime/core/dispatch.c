@@ -326,6 +326,9 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
          * with the delivery (DESIGN §3.4). The handler gets no reply buffer. */
         qmp_hdr_init_reply(rh, &h, 0, 0);
         send_reply(s, info->rcvid, rh, NULL, 0);
+        /* The kernel leaves this thread at the caller's priority until its next receive
+         * (V-QNX-011): go back to the worker's own before running the handler. */
+        qmp_worker_restore_priority(infl);
         qmp_req_t req_storage;
         qmp_req_impl_t *req = (qmp_req_impl_t *)(void *)&req_storage;
         memset(req, 0, sizeof(*req));

@@ -82,7 +82,12 @@ typedef struct qmp_inflight {
     int64_t rcvid;
     int32_t scoid;
     uint8_t state; /* enum qmp_infl_state */
-    uint8_t _pad0[3];
+    /* The worker's own scheduling, sampled before its first receive (0 = unknown). On QNX
+     * a receiving thread takes the sender's priority and KEEPS it after the reply, until
+     * its next receive (V-QNX-011), so one-way dispatch restores this explicitly. */
+    uint8_t base_prio;
+    uint8_t base_policy;
+    uint8_t _pad0;
 } qmp_inflight_t;
 
 typedef struct qmp_req_impl {
@@ -176,6 +181,12 @@ QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_server_impl_t) <= QMP_ALIGNOF(qmp_server_t),
  * everything is reported to the client. infl is the calling worker's in-flight slot
  * (NULL = cancellation of running handlers disabled, e.g. direct test calls).
  * Exposed for unit tests. */
+/* Put the calling worker back at the priority it had before its first receive. Called
+ * after the receipt reply of a one-way request, so the handler does not keep running at
+ * the priority of a caller that is no longer waiting (DESIGN §3.4). No-op when the
+ * priority is unchanged (host transports, fixed-priority channels) or unknown. */
+void qmp_worker_restore_priority(const qmp_inflight_t *infl);
+
 void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8_t *rcv, size_t len,
                          uint8_t *rep, size_t rep_cap, qmp_inflight_t *infl);
 

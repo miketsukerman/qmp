@@ -12,5 +12,7 @@ This product bundles or depends on the following third-party components:
 * Protocol Buffers (build-time dependency of protoc-gen-qmp), BSD-3-Clause.
 * Jinja2 (build-time dependency of protoc-gen-qmp), BSD-3-Clause.
 * GoogleTest (test-only dependency, fetched by CMake when QMP_BUILD_TESTS=ON), BSD-3-Clause.
+* nlohmann/json 3.11.3 (qmpctl only, header-only, fetched by CMake when QMP_BUILD_TOOLS=ON),
+  MIT, https://github.com/nlohmann/json.
 * grpcio-tools (developer-only, provides a protoc matching the Python protobuf runtime),
   Apache-2.0.

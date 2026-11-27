@@ -15,6 +15,8 @@ namespace qmpctl {
 
 namespace {
 
+/* VERIFY(qnx8): V-QNX-048 — the names attached with name_attach("qmp/<svc>-<inst>/v<N>")
+ * appear as a directory tree that an unprivileged process can walk with opendir/readdir. */
 constexpr char kQnxRoot[] = "/dev/name/local/qmp";
 
 int hex_digit(char c) {

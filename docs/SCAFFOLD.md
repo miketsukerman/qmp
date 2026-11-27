@@ -80,7 +80,7 @@ qmp/
 │       ├── test_hdr.cpp  test_dispatch.cpp  test_errors.cpp  test_deferred.cpp  test_subs.cpp
 │       └── test_e2e_fake.cpp        C client → fake → C server ops → reply
 ├── adapters/uprotocol/              (W4 stretch) CMakeLists, utransport_qmp.hpp/.cpp, tests
-├── tools/qmpctl/                    (W3) main.cpp, cmd_list/call/sub/info; nlohmann/json for reflect
+├── tools/qmpctl/                    qmpctl.cpp (list/describe/call/subscribe), reflect, codec, discover; nlohmann/json
 ├── bench/                           (W4) latency.c jitter.c throughput.c prio_inversion.c, run.sh, plot.py
 ├── examples/joint_demo/
 │   ├── CMakeLists.txt

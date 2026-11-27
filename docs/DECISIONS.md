@@ -307,3 +307,47 @@ on the host, so a green host run predicts target behaviour. + No `#ifdef __QNX__
 − The fake transport is more complex (connection table, event queue). − `type_id` is 0 until
 `ConnectClientInfoExt` with `_NTO_CLIENTINFO_GETTYPEID` is verified on target (V-QNX-014), so
 `qmp.allow_types` checks cannot be enforced yet — only uid/gid ACLs work today.
+
+---
+
+## ADR-010 Services serve their own reflection data; qmpctl is reflection-only
+
+**Status:** accepted 2026-11-27 (W3).
+
+**Context.** `qmpctl` must work with any qmp service without being rebuilt for it (ADR-006: it
+links only the C ABI). The generator already writes `<svc>.reflect.json` and embeds the same
+bytes in the service binary, but nothing made them reachable: a tool on the target would have
+needed the right JSON file for every running service, kept in step with each binary by hand.
+There is no registry process and no global name service (DESIGN §8).
+
+**Decision.**
+1. *The service is the source of truth for its own interface.* `qmp_service_desc_t` gains
+   `reflect_json`/`reflect_json_len` (generated code fills them) and the runtime answers a
+   new control opcode `QMP_OP_REFLECT` with a window of the document, at most
+   `QMP_REFLECT_CHUNK_MAX` (4096) bytes per call, replied directly from the constant blob.
+   `qmp_client_reflect()` is the client side. No new message type, no change to existing
+   opcodes or payloads: wire protocol v1 grows by one additive control opcode.
+2. *`qmpctl` contains no generated code.* It discovers names from the transport's namespace,
+   reads each service's reflection document, validates it (it is untrusted input) and
+   converts JSON ⇄ fixed-layout payloads itself. `--reflect FILE` remains as the fallback for
+   services that cannot describe themselves (hand-written descriptors, older runtimes).
+3. *Tests keep the compiler as the oracle.* The codec is tested against the structs
+   `protoc-gen-qmp` generated for the same proto, so reflection data and C layout cannot drift
+   apart unnoticed.
+4. *nlohmann/json 3.11.3 (MIT)* is the JSON library for tools, fetched at configure time and
+   pinned by hash. `libqmp` itself stays dependency-free C11.
+
+**Alternatives considered.** (a) File-only reflection (`--reflect` mandatory): no runtime
+change, but unusable on a target where the files are not deployed, and silently wrong when a
+file is stale. (b) A generated "introspection method" in every service: consumes a method id
+per service and makes the IDL carry tooling concerns. (c) A registry daemon: a new single
+point of failure for something `/dev/name/local` already provides.
+
+**Consequences.** + `qmpctl list|describe|call|subscribe` work against any running generated
+service with zero deployment. + The document a tool sees is by construction the one the binary
+was built from. − Each service binary answers one more opcode; the blob (≈6 KiB for the Joint
+example) was already embedded. − The interface description is readable by any client that may
+connect to the channel; it is not covered by the per-method ACL hook (it reveals names and
+layouts, never data). A deployment that considers this sensitive restricts `channel connect`
+with secpol, or registers a descriptor without the blob. − Servers built before this ADR answer
+`ENOSYS` and need `--reflect`.

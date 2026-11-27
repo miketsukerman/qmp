@@ -107,6 +107,7 @@ Control opcodes (`QMP_F_CONTROL` set; `resource_id` field):
 | `QMP_OP_SUBSCRIBE` | 2 | `qmp_subscribe_t {u16 topic_id; u16 event_len; u8 pad[4]; u8 event[64];}` — `event` is the client's **registered** `struct sigevent`, rewritten in place by `MsgRegisterEvent` (V-QNX-042); opaque to the core | `qmp_subscribe_reply_t {u32 sub_id; u16 mode; u16 depth; u64 seq;}` — `seq` is the newest published sequence (0 = none yet); only *newer* updates are delivered |
 | `QMP_OP_UNSUBSCRIBE` | 3 | `qmp_unsubscribe_t {u32 sub_id; u8 pad[4];}` | empty |
 | `QMP_OP_PULL` | 4 | `qmp_pull_t {u16 topic_id; u8 pad[6]; u64 after_seq;}` — `after_seq` is the newest sequence the client has consumed; the source of truth (pulses are advisory, V-QNX-044) | `qmp_pull_reply_t {u64 seq; u64 dropped; u32 remaining; u32 count;}` + `count` (0 or 1 in v1) sample structs; `dropped` counts overwritten/overflowed updates, never hidden; `remaining > 0` ⇒ pull again |
+| `QMP_OP_REFLECT` | 5 | `qmp_reflect_t {u32 offset; u32 max_len;}` — a window of the service's reflection JSON (§3.9) | `qmp_reflect_reply_t {u32 total_len; u32 len;}` + `len` bytes (at most `QMP_REFLECT_CHUNK_MAX` = 4096, not NUL-terminated); `len == 0` at or past the end — or `MsgError(ENOSYS)` when the service carries no reflection data |
 
 Payload rules (generator-enforced):
 
@@ -334,6 +335,48 @@ poll-less sync-only clients) — never on a hidden thread (Q3).
 
 The adapter is the only place protobuf *encoding* exists; the native path never serialises.
 PUBLISH maps to a qmp subscription driven by the adapter's own `qmp_client_poll()` thread.
+
+### 3.9 Reflection and `qmpctl` (ADR-010)
+
+Every generated service embeds its `<svc>.reflect.json` and points its `qmp_service_desc_t` at
+it; the runtime serves the bytes through `QMP_OP_REFLECT`. A tool therefore needs nothing but
+the C ABI and a running service — no generated code, no side file, no registry.
+
+```
+ qmpctl (proc C)                                   K            joint_service (C)
+ opendir("/dev/name/local/qmp") → "0101-0000/v1"                (the names ARE the registry)
+ qmp_client_connect(0x0101, 0, major 1, minor 0)   ── HELLO ──►
+ qmp_client_reflect(offset 0, cap 4096)  MsgSendv([hdr CONTROL/REFLECT, {0, 4096}]) ──────►
+      ◄────────────── MsgReplyv([hdr][{total 5866, len 4096}][blob + 0 … 4096))
+ qmp_client_reflect(offset 4096, …)      … until offset == total_len
+ parse + validate the document (every offset/size bounds-checked: it is untrusted input)
+ `call`:      JSON ──encode by reflection──► POD payload ── qmp_client_call ──► handler
+              reply POD ──decode──► JSON on stdout
+ `subscribe`: qmp_client_subscribe + qmp_client_poll; one JSON line per pulled sample
+```
+
+* The chunk is replied **straight from the constant blob** (a third reply iov part): it never
+  passes through the per-worker work buffer, so its size is independent of the interface's
+  `max_msg_size` and no memory is reserved for it.
+* REFLECT is a control opcode like HELLO: it is not subject to the per-method `acl_check`
+  hook. It discloses the interface (names, ids, layouts), never data. Channel-level access
+  is still governed by secpol `channel connect` rules.
+* Tools only — it allocates nothing and takes no lock, but a control loop has no reason to
+  call it.
+* A hand-written descriptor (`reflect_json == NULL`) and a runtime older than the opcode both
+  answer `ENOSYS`; `qmpctl --reflect <svc>.reflect.json` covers those services.
+* `qmpctl list` enumerates names (`/dev/name/local/qmp/<svc>-<inst>/v<major>` on QNX,
+  V-QNX-048; `$QMP_UDS_DIR/qmp.<svc>-<inst>.v<major>.sock` on the uds transport) and asks each
+  service who it is. A name nobody answers behind is shown as stale, not hidden.
+* JSON mapping: bool → `true`/`false`; integers → numbers (decimal/hex strings accepted on
+  input); float/double → numbers (`"NaN"`, `"Infinity"`, `"-Infinity"`); enum → value name
+  (number accepted; printed when unnamed); string → string; bytes → base64; nested message →
+  object; repeated → array. Encoding is strict (unknown key, wrong type, value out of range,
+  `max_len`/`max_count` exceeded are errors, never truncation); absent keys keep the proto3
+  default.
+* `qmpctl` connects with minor version 0 and the priority it was started with: the call is a
+  normal `MsgSend`, so `on -p <prio> qmpctl call …` exercises priority inheritance like any
+  other client.
 
 ---
 

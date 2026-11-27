@@ -32,7 +32,8 @@ jobs:
       - name: clang-format
         run: |
           git ls-files 'include/**/*.h' 'runtime/**/*.c' 'runtime/**/*.h' 'runtime/**/*.cpp' \
-            'examples/**/*.c' 'examples/**/*.h' | xargs clang-format --dry-run -Werror
+            'examples/**/*.c' 'examples/**/*.h' 'tools/**/*.cpp' 'tools/**/*.hpp' \
+            | xargs clang-format --dry-run -Werror
       - name: cppcheck
         run: |
           cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability \
@@ -106,7 +107,7 @@ jobs:
       - name: every VERIFY() marker in sources has an entry in docs/VERIFY.md
         run: |
           set -e
-          ids=$(git grep -ho 'VERIFY([a-z0-9]*): V-[A-Z]*-[0-9]*' -- include runtime codegen cmake idl examples \
+          ids=$(git grep -ho 'VERIFY([a-z0-9]*): V-[A-Z]*-[0-9]*' -- include runtime codegen cmake idl examples tools \
                 | sed 's/.*: //' | sort -u)
           rc=0
           for id in $ids; do

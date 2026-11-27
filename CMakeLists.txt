@@ -13,7 +13,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(QMP_BUILD_TESTS "Build unit and end-to-end tests" ON)
-option(QMP_BUILD_TOOLS "Build qmpctl (W3)" OFF)
+option(QMP_BUILD_TOOLS "Build qmpctl" ON)
 option(QMP_BUILD_BENCH "Build benchmarks (W4)" OFF)
 option(QMP_BUILD_ADAPTER "Build the uProtocol UTransport adapter (W4, stretch)" OFF)
 option(QMP_BUILD_EXAMPLES "Build the joint example (host: fake transport only)" ON)
@@ -76,6 +76,10 @@ if(QMP_BUILD_TESTS)
 endif()
 
 add_subdirectory(runtime)
+
+if(QMP_BUILD_TOOLS)
+  add_subdirectory(tools/qmpctl)
+endif()
 
 if(QMP_BUILD_EXAMPLES)
   add_subdirectory(examples/joint_demo)

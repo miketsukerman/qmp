@@ -9,7 +9,7 @@
  * can be observed with pidin. Companion client: joint_client.c; orchestration:
  * scripts/target-smoke.sh.
  *
- * Usage: qmp_joint_server [--threads N] [--verbose] [--fake] [--fixed-priority]
+ * Usage: qmp_joint_server [--threads N] [--verbose] [--transport NAME] [--fixed-priority]
  *                         [--publish-ms N] [--selftest]
  *   --threads N        worker threads, 1..QMP_SERVER_MAX_THREADS (default 2)
  *   --publish-ms N     publish the StateChanged (LATEST) and StateLog (QUEUE depth 8)
@@ -17,8 +17,11 @@
  *                      notified with MsgDeliverEvent and pull the sample (ADR-003); a
  *                      slow or dead subscriber never blocks this.
  *   --verbose          log each call and reply (off by default: no fast-path logging)
- *   --fake             allow the in-process fake transport (host); otherwise the server
- *                      refuses to start when the default transport is not "qnx"
+ *   --transport NAME   qnx | uds | fake (default: qnx on QNX, uds on the host). uds is
+ *                      the AF_UNIX bench/test transport (ADR-004): it works across
+ *                      processes on the host and on QNX but has NO priority inheritance.
+ *                      fake is in-process only, so it is refused except for --selftest.
+ *   --fake             same as --transport fake
  *   --fixed-priority   negative control for priority inheritance: the channel is created
  *                      with _NTO_CHF_FIXED_PRIORITY (QMP_LISTEN_FIXED_PRIORITY), so
  *                      handler threads keep their own priority instead of inheriting the
@@ -270,14 +273,17 @@ static void *signal_thread(void *arg) {
     return NULL;
 }
 
-/* ---- host self-test (fake transport, in-process client) ------------------------------ */
+/* ---- host self-test (in-process client on the server's transport; fake by default) --- */
 
 #if !defined(__QNX__)
+static const qmp_transport_t *g_selftest_tr; /* set once in main before the thread starts */
+
 static void *selftest_client(void *arg) {
     qmp_server_t *server = (qmp_server_t *)arg;
     qmp_client_t c;
     int32_t status = 0;
-    int rc = demo_joint_v1_Joint_connect(&c, 0, NULL);
+    qmp_client_cfg_t ccfg = {.transport = g_selftest_tr};
+    int rc = demo_joint_v1_Joint_connect(&c, 0, &ccfg);
     demo_joint_v1_SetTargetRequest req = {0.5f, 1.0f};
     demo_joint_v1_SetTargetReply rep;
     demo_joint_v1_JointState st;
@@ -313,7 +319,8 @@ static uint64_t g_topicbuf[DEMO_JOINT_V1_JOINT_TOPIC_STORAGE_SIZE / 8 + 1];
 
 static int usage(const char *argv0) {
     fprintf(stderr,
-            "usage: %s [--threads N] [--verbose] [--fake] [--fixed-priority] [--publish-ms N] "
+            "usage: %s [--threads N] [--verbose] [--transport qnx|uds|fake] [--fixed-priority] "
+            "[--publish-ms N] "
             "[--selftest]\n",
             argv0);
     return 2;
@@ -322,7 +329,7 @@ static int usage(const char *argv0) {
 int main(int argc, char **argv) {
     int nthreads = 2;
     int verbose = 0;
-    int use_fake = 0;
+    const char *tr_name = NULL;
     int selftest = 0;
     int fixed_priority = 0;
     long publish_ms = 0;
@@ -333,11 +340,12 @@ int main(int argc, char **argv) {
             publish_ms = atol(argv[++i]);
         } else if (strcmp(argv[i], "--verbose") == 0) {
             verbose = 1;
+        } else if (strcmp(argv[i], "--transport") == 0 && i + 1 < argc) {
+            tr_name = argv[++i];
         } else if (strcmp(argv[i], "--fake") == 0) {
-            use_fake = 1;
+            tr_name = "fake";
         } else if (strcmp(argv[i], "--selftest") == 0) {
             selftest = 1;
-            use_fake = 1; /* the host default transport is the fake */
         } else if (strcmp(argv[i], "--fixed-priority") == 0) {
             fixed_priority = 1;
         } else {
@@ -353,13 +361,23 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    const qmp_transport_t *tr = use_fake ? qmp_transport_fake() : qmp_transport_default();
-    if (!use_fake && strcmp(tr->name, "qnx") != 0) {
-        fprintf(stderr,
-                "joint_server: default transport is \"%s\", not the native QNX transport;\n"
-                "refusing to start (pass --fake to use the in-process fake on the host)\n",
-                tr->name);
+    if (selftest && tr_name == NULL) {
+        tr_name = "fake"; /* client and server share this process */
+    }
+    const qmp_transport_t *tr =
+        tr_name != NULL ? qmp_transport_by_name(tr_name) : qmp_transport_default();
+    if (tr == NULL) {
+        fprintf(stderr, "joint_server: transport \"%s\" is not available in this build\n", tr_name);
         return 2;
+    }
+    if (!selftest && strcmp(tr->name, "fake") == 0) {
+        fprintf(stderr, "joint_server: the fake transport is in-process only; no client in\n"
+                        "another process could reach this server (use --selftest)\n");
+        return 2;
+    }
+    if (strcmp(tr->name, "uds") == 0) {
+        fprintf(stderr, "joint_server: transport=uds is for benchmarks and host tests only: "
+                        "NO priority inheritance (ADR-004)\n");
     }
 
     /* Block SIGINT/SIGTERM before any thread exists so only signal_thread sees them. */
@@ -425,6 +443,7 @@ int main(int argc, char **argv) {
     int result = 0;
 #if !defined(__QNX__)
     pthread_t st_thread;
+    g_selftest_tr = tr;
     if (selftest && pthread_create(&st_thread, NULL, selftest_client, &server) != 0) {
         return 1;
     }

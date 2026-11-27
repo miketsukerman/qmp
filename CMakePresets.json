@@ -10,7 +10,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "QMP_BUILD_TESTS": "ON",
-        "QMP_BUILD_TOOLS": "ON"
+        "QMP_BUILD_TOOLS": "ON", "QMP_BUILD_BENCH": "ON"
       }
     },
     { "name": "host-debug", "inherits": "host-base",
@@ -29,7 +29,7 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "toolchainFile": "${sourceDir}/cmake/qnx-aarch64le.cmake",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "QMP_BUILD_TESTS": "ON",
-                          "QMP_BUILD_TOOLS": "ON" }
+                          "QMP_BUILD_TOOLS": "ON", "QMP_BUILD_BENCH": "ON" }
     },
     {
       "name": "qnx-x86_64",
@@ -37,7 +37,7 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "toolchainFile": "${sourceDir}/cmake/qnx-x86_64.cmake",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "QMP_BUILD_TESTS": "ON",
-                          "QMP_BUILD_TOOLS": "ON" }
+                          "QMP_BUILD_TOOLS": "ON", "QMP_BUILD_BENCH": "ON" }
     }
   ],
   "buildPresets": [

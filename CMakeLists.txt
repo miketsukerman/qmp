@@ -100,3 +100,7 @@ if(QMP_BUILD_EXAMPLES)
   add_subdirectory(examples/joint_demo)
   add_subdirectory(examples/smoke)
 endif()
+
+if(QMP_BUILD_BENCH)
+  add_subdirectory(bench)
+endif()

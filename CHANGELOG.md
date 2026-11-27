@@ -13,6 +13,19 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-27
+
+Wire version 1 · reflection version 1
+
+### Added
+- Priority-inversion benchmark `qmp_bench_prio_inversion` (`bench/prio_inversion.c`,
+  `-DQMP_BUILD_BENCH=ON`, on in every preset): a priority-30 caller, a priority-10 server
+  and a priority-15 CPU hog on one core, over native message passing, native message
+  passing without inheritance (`--fixed-priority`) and UDS. It reports the latency
+  distribution and the priority the handler ran at, and can dump every sample.
+- `bench/run.sh` runs the six configurations on the target pinned to one CPU and collects
+  the results; `bench/plot.py` turns them into a Markdown table and an SVG chart.
+
 ## [0.3.1] - 2026-11-27
 
 Wire version 1 · reflection version 1

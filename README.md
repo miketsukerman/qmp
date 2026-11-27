@@ -61,7 +61,7 @@ client, so topics use notify-then-pull over registered events. The same core
 also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
 only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Status (0.3.1, W3)
+## Status (0.3.2, W4)
 
 | Area | State |
 |------|-------|
@@ -72,7 +72,8 @@ only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 | examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
 | tests | 128 GoogleTest cases: 94 in `qmp_core_tests` (22 over UDS, including two-process kill -9 scenarios) and 34 in `qmpctl_tests` (JSON codec checked against generated structs; commands run against live servers) + `joint_server --selftest` (host) + 58 codegen pytest cases, asan/ubsan/tsan clean |
 | on target | RPi5, build `3527c7ed29fb` (2026-11-27, version 0.3.1): 97/97 `qmp_core_tests` cases (22 over UDS), `qmpctl_tests` 33/33 runnable on the native transport, 23/23 `scripts/target-smoke.sh` scenarios (four of them through `qmpctl`), including the one-way `Stop` whose handler runs at the server's own priority 10 for a priority-30 caller. Build `9598188d39ac` (version 0.3.0): `qmpctl_tests` 34/34 over UDS. Wire compatibility with the last pre-versioning build `3cd249234123` checked in both directions over the native transport (old server with new `qmpctl` and client, new server with old `qmpctl` and client). Build `a4230da3880c`: joint demo over `--transport uds` and `qnx`; results recorded in [docs/VERIFY.md](docs/VERIFY.md). Same-board round trip, `loop 5000` with a 5 s timeout: native median 4.0 µs / p99 5.7 µs, UDS median 57.8 µs / p99 68.5 µs (a first look, not the W4 benchmark) |
-| next | bench, secpol generation, uProtocol adapter (W4, adapter is stretch); C++ wrappers in the generator (stretch) |
+| bench | `bench/prio_inversion.c`: a priority-30 caller, a priority-10 server and a priority-15 CPU hog on one core, over native message passing, native without inheritance and UDS; `bench/run.sh` runs it on the board, `bench/plot.py` makes the table and chart |
+| next | secpol generation, uProtocol adapter (W4, adapter is stretch); C++ wrappers in the generator (stretch) |
 
 ## Versioning
 
@@ -84,7 +85,7 @@ and patch are in [ADR-011](docs/DECISIONS.md).
 
 | Number | Now | Answers | Where |
 |--------|-----|---------|-------|
-| product version | 0.3.1 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
+| product version | 0.3.2 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
 | wire version | 1 | can these two processes talk? Equal means yes | `QMP_WIRE_VERSION`, exchanged in HELLO |
 | reflection version | 1 | can this `qmpctl` read that service's description? | `qmp_reflect_version` in the reflection JSON |
 | service version | per service | is this client compatible with that interface? | `(uprotocol.service_version_*)` in the `.proto` |
@@ -212,6 +213,24 @@ scripts/target-smoke.sh
 
 Walkthrough: [Codelab 02](docs/codelab/02-first-service-on-qnx.md).
 
+### Priority-inversion benchmark
+
+`bench/prio_inversion.c` puts three threads on one CPU: a server worker at priority 10, a
+hog at priority 15 that spins for 20 ms and sleeps for 5 ms, and a client at priority 30
+that calls `SetTarget` about every 7 ms and times each round trip. Over native message
+passing the worker inherits the caller's priority and the hog cannot delay the call. Over
+UDS, or on a native channel created with `_NTO_CHF_FIXED_PRIORITY` (the negative control),
+the worker stays at 10 and the call waits for the hog to finish its burst.
+
+```sh
+export QMP_TARGET=qnxuser@<pi5-address>
+bench/run.sh --calls 5000              # six runs, each pinned with `on -C 3`
+bench/plot.py bench/results/<build id> # Markdown table on stdout, latency.svg in that directory
+```
+
+Each run prints one `result:` line and reports the priority the handler really ran at
+(`handler_prio_min`/`handler_prio_max`). Results land in `bench/results/`, which git ignores.
+
 Sanitizers on target: `-DQMP_SANITIZER=ubsan` (asan needs the shared runtime; no tsan on QNX —
 use the host tsan preset).
 
@@ -229,6 +248,7 @@ examples/joint_demo/  qmp_joint_server / qmp_joint_client: Joint actuator servic
                       (--selftest on host; publisher/subscriber modes for topics)
 examples/smoke/       qmp_smoke: hand-written service for target edge-case scenarios
 tools/qmpctl/         qmpctl: list/describe/call/subscribe from reflection data (C++17, C ABI only)
+bench/                prio_inversion.c (W4 benchmark), run.sh (run it on the board), plot.py
 scripts/              target-run.sh, target-smoke.sh (SSH to the QNX board)
 cmake/                presets support, qnx-*.cmake toolchains, QmpCodegen.cmake
 docs/                 DESIGN, DECISIONS (ADRs), VERIFY register, codelab, spikes

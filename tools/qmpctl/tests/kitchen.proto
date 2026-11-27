@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: Apache-2.0
+// Test-only service for qmpctl: one message that uses every field shape of the v1 IDL
+// subset (all scalars, enum, string, bytes, nested message, and repeated forms of each),
+// so the reflection-driven JSON codec is checked against generated structs.
+syntax = "proto3";
+
+package qmp.test.kitchen.v1;
+
+import "uprotocol/uoptions.proto";
+import "qmp/options.proto";
+
+enum Color {
+  COLOR_UNSPECIFIED = 0;
+  COLOR_RED = 1;
+  COLOR_BLUE = 5;
+}
+
+message Inner {
+  int32 a = 1;
+  string tag = 2 [(qmp.max_len) = 5];
+}
+
+message Sink {
+  bool flag = 1;
+  int32 i32 = 2;
+  uint32 u32 = 3;
+  int64 i64 = 4;
+  uint64 u64 = 5;
+  float f = 6;
+  double d = 7;
+  Color color = 8;
+  string name = 9 [(qmp.max_len) = 12];
+  bytes blob = 10 [(qmp.max_len) = 6];
+  Inner inner = 11;
+  repeated uint32 nums = 12 [(qmp.max_count) = 4];
+  repeated string tags = 13 [(qmp.max_len) = 3, (qmp.max_count) = 3];
+  repeated Inner inners = 14 [(qmp.max_count) = 2];
+  repeated bool bits = 15 [(qmp.max_count) = 1];
+  repeated Color colors = 16 [(qmp.max_count) = 2];
+  repeated bytes chunks = 17 [(qmp.max_len) = 2, (qmp.max_count) = 2];
+  repeated double reals = 18 [(qmp.max_count) = 2];
+}
+
+message Empty {}
+
+service Kitchen {
+  option (uprotocol.service_id) = 0x0777;
+  option (uprotocol.service_name) = "qmp.test.Kitchen";
+  option (uprotocol.service_version_major) = 2;
+  option (uprotocol.service_version_minor) = 3;
+  option (uprotocol.publish_topic) = {
+    id : 0x8001
+    name : "Tick"
+    message : "Inner"
+  };
+  option (uprotocol.publish_topic) = {
+    id : 0x8002
+    name : "Log"
+    message : "Sink"
+  };
+  option (qmp.topic_mode) = {
+    topic_id : 0x8002
+    mode : MODE_QUEUE
+    depth : 4
+  };
+
+  // Returns its argument unchanged.
+  rpc Echo(Sink) returns (Sink) {
+    option (uprotocol.method_id) = 0x0001;
+  }
+  // Fails with application status `a` (0 = succeed and echo).
+  rpc Fail(Inner) returns (Inner) {
+    option (uprotocol.method_id) = 0x0002;
+  }
+  // No request payload, no reply payload.
+  rpc Ping(Empty) returns (Empty) {
+    option (uprotocol.method_id) = 0x0003;
+  }
+  // One-way with a payload: the handler records it.
+  rpc Fire(Inner) returns (Empty) {
+    option (uprotocol.method_id) = 0x0004;
+    option (qmp.oneway) = true;
+  }
+  // Publishes its argument on Tick and `a` copies of an empty Sink on Log.
+  rpc Publish(Inner) returns (Empty) {
+    option (uprotocol.method_id) = 0x0005;
+  }
+}

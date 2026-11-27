@@ -7,11 +7,21 @@ add_library(qmp STATIC
   core/dispatch.c
   core/topics.c
   core/server.c
+  core/transport.c
   transport/fake/fake_transport.c)
 if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
   # Native message passing is the default transport on QNX; the fake stays available
   # (and selectable) for tests.
   target_sources(qmp PRIVATE transport/qnx/qnx_transport.c)
+endif()
+if(QMP_TRANSPORT_UDS)
+  # ADR-004: bench and host-test transport, NO priority inheritance. The PUBLIC macro is
+  # what makes qmp_transport_uds() visible to consumers, and names what it is for.
+  target_sources(qmp PRIVATE transport/uds/uds_transport.c)
+  target_compile_definitions(qmp PUBLIC QMP_TRANSPORT_UDS_BENCH_ONLY=1)
+  if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
+    target_link_libraries(qmp PUBLIC socket)
+  endif()
 endif()
 add_library(qmp::qmp ALIAS qmp)
 target_include_directories(qmp PUBLIC

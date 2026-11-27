@@ -588,8 +588,4 @@ const qmp_transport_t *qmp_transport_qnx(void) {
     return &g_qnx;
 }
 
-const qmp_transport_t *qmp_transport_default(void) {
-    return &g_qnx; /* native message passing is the default on QNX */
-}
-
 #endif /* __QNX__ */

@@ -828,9 +828,3 @@ int qmp_transport_fake_unblock_inject(const char *path) {
     (void)pthread_mutex_unlock(&g_lock);
     return rc;
 }
-
-#if !defined(__QNX__) /* on QNX: runtime/transport/qnx/qnx_transport.c */
-const qmp_transport_t *qmp_transport_default(void) {
-    return &g_fake; /* W3 replaces this with the uds transport on the host */
-}
-#endif

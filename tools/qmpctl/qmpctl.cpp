@@ -2,6 +2,7 @@
 #include "qmpctl.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -36,7 +37,9 @@ constexpr int kExitUsage = 2;
 constexpr uint64_t kNsPerMs = 1000ULL * 1000ULL;
 constexpr uint64_t kPollSliceNs = 200 * kNsPerMs; // how often subscribe looks at the stop flag
 
-volatile std::sig_atomic_t g_stop = 0;
+// Set from a signal handler (a lock-free atomic is async-signal-safe) or another thread.
+std::atomic<int> g_stop{0};
+static_assert(std::atomic<int>::is_always_lock_free, "g_stop is written from a signal handler");
 
 const char kNotRegistered[] = "not registered";
 
@@ -906,6 +909,7 @@ int cmd_subscribe(const Options &opt, Io &io) {
     }
     const auto start = std::chrono::steady_clock::now();
     int exit_code = kExitOk;
+    g_stop = 0; // a stop request is for the subscription that is running, not a later one
     while (g_stop == 0 && (opt.count == 0 || ctx.received < opt.count)) {
         uint64_t slice = kPollSliceNs;
         if (opt.duration_ms != 0) {
@@ -1032,7 +1036,6 @@ void request_stop() {
 
 int run(const std::vector<std::string> &args, std::istream &in, std::ostream &out,
         std::ostream &err) {
-    g_stop = 0;
     Io io{in, out, err};
     Options opt;
     std::string command;

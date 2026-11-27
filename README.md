@@ -61,7 +61,7 @@ client, so topics use notify-then-pull over registered events. The same core
 also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
 only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Status (W3 in progress)
+## Status (0.3.0, W3)
 
 | Area | State |
 |------|-------|
@@ -70,8 +70,8 @@ only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 | transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events); `uds` (`AF_UNIX`/`SOCK_SEQPACKET`, host default, also built on QNX) for benchmarks and host integration tests only — **no priority inheritance** (ADR-004) |
 | tools | `qmpctl list \| describe \| call \| subscribe`: C++17, links only the C ABI, no generated code — every generated service serves its own reflection JSON (`QMP_OP_REFLECT`, ADR-010) and qmpctl converts JSON ⇄ fixed-layout payloads from it ([Codelab 04](docs/codelab/04-inspect-with-qmpctl.md)) |
 | examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
-| tests | 122 GoogleTest cases: 88 in `qmp_core_tests` (22 over UDS, including two-process kill -9 scenarios) and 34 in `qmpctl_tests` (JSON codec checked against generated structs; commands run against live servers) + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
-| on target | RPi5, build `3cd249234123` (2026-11-27): 88/88 `qmp_core_tests` cases (22 over UDS), `qmpctl_tests` 33/33 runnable on the native transport and 34/34 over UDS, 22/22 `scripts/target-smoke.sh` scenarios (four of them through `qmpctl`). Build `a4230da3880c`: joint demo over `--transport uds` and `qnx`; results recorded in [docs/VERIFY.md](docs/VERIFY.md). Same-board round trip, `loop 5000` with a 5 s timeout: native median 4.0 µs / p99 5.7 µs, UDS median 57.8 µs / p99 68.5 µs (a first look, not the W4 benchmark) |
+| tests | 128 GoogleTest cases: 94 in `qmp_core_tests` (22 over UDS, including two-process kill -9 scenarios) and 34 in `qmpctl_tests` (JSON codec checked against generated structs; commands run against live servers) + `joint_server --selftest` (host) + 58 codegen pytest cases, asan/ubsan/tsan clean |
+| on target | RPi5, build `9598188d39ac` (2026-11-27, version 0.3.0): 94/94 `qmp_core_tests` cases (22 over UDS), `qmpctl_tests` 33/33 runnable on the native transport and 34/34 over UDS, 22/22 `scripts/target-smoke.sh` scenarios (four of them through `qmpctl`). Wire compatibility with the last pre-versioning build `3cd249234123` checked in both directions over the native transport (old server with new `qmpctl` and client, new server with old `qmpctl` and client). Build `a4230da3880c`: joint demo over `--transport uds` and `qnx`; results recorded in [docs/VERIFY.md](docs/VERIFY.md). Same-board round trip, `loop 5000` with a 5 s timeout: native median 4.0 µs / p99 5.7 µs, UDS median 57.8 µs / p99 68.5 µs (a first look, not the W4 benchmark) |
 | next | bench, secpol generation, uProtocol adapter (W4, adapter is stretch); C++ wrappers and one-way trampolines in the generator (stretch) |
 
 ## Versioning

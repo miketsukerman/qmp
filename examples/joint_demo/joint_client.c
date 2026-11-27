@@ -4,7 +4,7 @@
  * on a QNX target (pidin, kill -9, priority inheritance). Orchestrated by
  * scripts/target-smoke.sh; every mode can also be run by hand in a second SSH session.
  *
- * Usage: qmp_joint_client [--timeout MS] [--expect ERRNO] [--fake] <mode> [args]
+ * Usage: qmp_joint_client [--timeout MS] [--expect ERRNO] [--transport NAME] <mode> [args]
  *   once                   one SetTarget + GetState round trip, print the state
  *   loop N [WARMUP]        WARMUP uncounted SetTarget calls (default 100), then N timed
  *                          ones; print min/median/p99/max latency in microseconds
@@ -30,8 +30,9 @@
  *                          ESRCH, ...): print PASS and exit 0 when the failing call
  *                          returns exactly that, FAIL and exit 1 on success or any other
  *                          error. Without it, success is PASS.
- *   --fake                 allow the in-process fake transport (host); otherwise the
- *                          client refuses to start when the transport is not "qnx"
+ *   --transport NAME       qnx | uds (default: qnx on QNX, uds on the host); must match
+ *                          the server. uds is the AF_UNIX bench/test transport (ADR-004)
+ *                          and has NO priority inheritance.
  *
  * Output: the last stdout line is "PASS <mode>" or "FAIL <mode>"; with --expect it also
  * names the expected and the actual outcome.
@@ -362,7 +363,8 @@ static int mode_subscribe(qmp_client_t *c, const char *topic, long want, long ma
 
 static int usage(const char *argv0) {
     fprintf(stderr,
-            "usage: %s [--timeout MS] [--expect ERRNO] [--fake] once | loop N [WARMUP] |"
+            "usage: %s [--timeout MS] [--expect ERRNO] [--transport qnx|uds] once |"
+            " loop N [WARMUP] |"
             " slow MS sleep|spin | late MS | reconnect [MAX_S] |"
             " subscribe [state|log] [N] [MAX_S] [SLOW_MS]\n",
             argv0);
@@ -371,7 +373,7 @@ static int usage(const char *argv0) {
 
 int main(int argc, char **argv) {
     long timeout_ms = 5000;
-    int use_fake = 0;
+    const char *tr_name = NULL;
     const char *expect_name = NULL;
     int expect = EOK;
     int i = 1;
@@ -384,8 +386,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "joint_client: --expect: unknown errno name \"%s\"\n", expect_name);
                 return 2;
             }
-        } else if (strcmp(argv[i], "--fake") == 0) {
-            use_fake = 1;
+        } else if (strcmp(argv[i], "--transport") == 0 && i + 1 < argc) {
+            tr_name = argv[++i];
         } else {
             return usage(argv[0]);
         }
@@ -395,12 +397,11 @@ int main(int argc, char **argv) {
     }
     const char *mode = argv[i++];
 
-    const qmp_transport_t *tr = use_fake ? qmp_transport_fake() : qmp_transport_default();
-    if (!use_fake && strcmp(tr->name, "qnx") != 0) {
-        fprintf(stderr,
-                "joint_client: default transport is \"%s\", not the native QNX transport;\n"
-                "refusing to run (pass --fake to use the in-process fake on the host)\n",
-                tr->name);
+    const qmp_transport_t *tr =
+        tr_name != NULL ? qmp_transport_by_name(tr_name) : qmp_transport_default();
+    if (tr == NULL || strcmp(tr->name, "fake") == 0) {
+        fprintf(stderr, "joint_client: transport \"%s\" cannot reach a server in another process\n",
+                tr_name != NULL ? tr_name : "fake");
         return 2;
     }
 

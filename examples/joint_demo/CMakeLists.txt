@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standalone server + client over the generated Joint bindings. On the host they use the
-# fake transport (pass --fake) and the server has a --selftest ctest; on QNX they talk
-# native message passing and are orchestrated by scripts/target-smoke.sh.
+# Standalone server + client over the generated Joint bindings. On the host they talk over
+# the UDS transport (two processes) and the server has an in-process --selftest ctest on
+# the fake transport; on QNX they talk native message passing (or --transport uds for the
+# benchmark comparison) and are orchestrated by scripts/target-smoke.sh.
 qmp_add_service(NAME joint_demo PROTO "${PROJECT_SOURCE_DIR}/idl/examples/demo/joint/v1/joint.proto"
                 SOURCES_VAR _joint_demo_src)
 

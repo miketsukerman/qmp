@@ -271,7 +271,7 @@ TEST_F(Cli, ListFlagsAStaleSocketOfAKilledServer) {
         GTEST_SKIP() << "socket files exist only on the uds transport";
     }
     // What kill -9 leaves behind: a bound socket file nobody listens on.
-    struct sockaddr_un sa{};
+    sockaddr_un sa = {};
     sa.sun_family = AF_UNIX;
     (void)std::snprintf(sa.sun_path, sizeof(sa.sun_path), "%s/qmp.0999-0000.v1.sock",
                         g_dir.c_str());

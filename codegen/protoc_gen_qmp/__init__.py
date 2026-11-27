@@ -3,4 +3,4 @@
 
 # Kept equal to include/qmp/qmp_version.h (one product version, ADR-011);
 # scripts/check-version.sh fails CI when they differ.
-__version__ = "0.3.2"
+__version__ = "0.3.3"

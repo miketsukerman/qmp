@@ -61,7 +61,7 @@ client, so topics use notify-then-pull over registered events. The same core
 also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
 only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Status (0.3.2, W4)
+## Status (0.3.3, W4)
 
 | Area | State |
 |------|-------|
@@ -85,7 +85,7 @@ and patch are in [ADR-011](docs/DECISIONS.md).
 
 | Number | Now | Answers | Where |
 |--------|-----|---------|-------|
-| product version | 0.3.2 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
+| product version | 0.3.3 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
 | wire version | 1 | can these two processes talk? Equal means yes | `QMP_WIRE_VERSION`, exchanged in HELLO |
 | reflection version | 1 | can this `qmpctl` read that service's description? | `qmp_reflect_version` in the reflection JSON |
 | service version | per service | is this client compatible with that interface? | `(uprotocol.service_version_*)` in the `.proto` |
@@ -213,6 +213,15 @@ scripts/target-smoke.sh
 
 Walkthrough: [Codelab 02](docs/codelab/02-first-service-on-qnx.md).
 
+### Joint demo: 500 Hz with kill and restart
+
+`scripts/target-demo.sh [qnx|uds]` starts `qmp_joint_server --publish-ms 2`, which publishes
+`StateChanged` at 500 Hz, and `qmp_joint_client monitor`, which prints the update rate, the
+updates dropped and the longest gap once per second. After 4 s the script kills the server
+with `-9` and restarts it 2 s later; the client reconnects and resubscribes by itself and
+the readout returns to 500 Hz. The script checks each of those steps and ends with
+`DEMO PASSED`.
+
 ### Priority-inversion benchmark
 
 `bench/prio_inversion.c` puts three threads on one CPU: a server worker at priority 10, a
@@ -249,7 +258,7 @@ examples/joint_demo/  qmp_joint_server / qmp_joint_client: Joint actuator servic
 examples/smoke/       qmp_smoke: hand-written service for target edge-case scenarios
 tools/qmpctl/         qmpctl: list/describe/call/subscribe from reflection data (C++17, C ABI only)
 bench/                prio_inversion.c (W4 benchmark), run.sh (run it on the board), plot.py
-scripts/              target-run.sh, target-smoke.sh (SSH to the QNX board)
+scripts/              target-run.sh, target-smoke.sh, target-demo.sh (SSH to the QNX board)
 cmake/                presets support, qnx-*.cmake toolchains, QmpCodegen.cmake
 docs/                 DESIGN, DECISIONS (ADRs), VERIFY register, codelab, spikes
 ```

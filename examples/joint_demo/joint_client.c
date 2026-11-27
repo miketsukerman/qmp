@@ -27,6 +27,14 @@
  *                          backlog; both report the dropped count instead of hiding loss.
  *                          If the server dies mid-stream, reconnect; the subscription is
  *                          re-established automatically on the new session (ADR-003).
+ *   monitor [state|log] [SECONDS] [MIN_HZ]
+ *                          live readout: subscribe and print one line per second with the
+ *                          update rate, the updates dropped and the longest gap between
+ *                          two updates, for SECONDS s (default 10). A server death is
+ *                          reported and the client reconnects and resubscribes, so the
+ *                          line after a restart shows the outage as its longest gap. PASS
+ *                          when the last full second delivered at least MIN_HZ updates
+ *                          (default 1).
  *
  *   --timeout MS           per-call timeout (default: 5000; 0 = block forever)
  *   --expect ERRNO         the mode is expected to fail with this errno name (ETIMEDOUT,
@@ -394,12 +402,105 @@ static int mode_subscribe(qmp_client_t *c, const char *topic, long want, long ma
     return ss.updates >= want ? EOK : ETIMEDOUT;
 }
 
+/* ---- monitor: one line per second (rate, loss, longest gap), across server restarts --- */
+
+typedef struct mon_stats {
+    long updates;     /* in the current one-second window */
+    uint64_t dropped; /* in the current window            */
+    uint64_t max_gap; /* longest gap between two updates that ended in this window, ns */
+    uint64_t last_rx; /* receive time of the previous update, 0 = none yet             */
+    long total;
+    uint64_t total_dropped;
+} mon_stats_t;
+
+static void on_monitor_update(void *ctx, const demo_joint_v1_JointState *st, uint64_t seq,
+                              uint64_t dropped) {
+    mon_stats_t *ms = (mon_stats_t *)ctx;
+    (void)st;
+    (void)seq;
+    uint64_t t = now_ns();
+    if (ms->last_rx != 0 && t - ms->last_rx > ms->max_gap) {
+        ms->max_gap = t - ms->last_rx;
+    }
+    ms->last_rx = t;
+    ms->updates++;
+    ms->dropped += dropped;
+    ms->total++;
+    ms->total_dropped += dropped;
+}
+
+static int mode_monitor(qmp_client_t *c, const char *topic, long seconds, long min_hz) {
+    int use_log;
+    if (strcmp(topic, "state") == 0) {
+        use_log = 0;
+    } else if (strcmp(topic, "log") == 0) {
+        use_log = 1;
+    } else {
+        fprintf(stderr, "joint_client: monitor topic must be state or log\n");
+        return OUTCOME_USAGE;
+    }
+    if (seconds < 1 || seconds > 3600 || min_hz < 0 || min_hz > LOOP_MAX) {
+        fprintf(stderr, "joint_client: monitor runs 1..3600 s\n");
+        return OUTCOME_USAGE;
+    }
+    static demo_joint_v1_Joint_StateChanged_sub_t sub_state;
+    static demo_joint_v1_Joint_StateLog_sub_t sub_log;
+    mon_stats_t ms;
+    memset(&ms, 0, sizeof(ms));
+    int rc =
+        use_log ? demo_joint_v1_Joint_subscribe_StateLog(c, &sub_log, on_monitor_update, &ms)
+                : demo_joint_v1_Joint_subscribe_StateChanged(c, &sub_state, on_monitor_update, &ms);
+    if (rc != EOK) {
+        LOGF("monitor: subscribe failed rc=%d (%s)", rc, strerror(rc));
+        return rc;
+    }
+    long last_rate = 0;
+    uint64_t window_end = now_ns() + 1000000000ULL;
+    for (long sec = 1; sec <= seconds;) {
+        uint64_t now = now_ns();
+        if (now >= window_end) {
+            printf("monitor: t=%lds rate=%ld Hz dropped=%" PRIu64 " max_gap=" US_FMT
+                   " connected=%d generation=%" PRIu32 "\n",
+                   sec, ms.updates, ms.dropped, US_ARGS(ms.max_gap), qmp_client_is_connected(c),
+                   qmp_client_server_generation(c));
+            (void)fflush(stdout);
+            last_rate = ms.updates;
+            ms.updates = 0;
+            ms.dropped = 0;
+            ms.max_gap = 0;
+            window_end += 1000000000ULL;
+            sec++;
+            continue;
+        }
+        rc = qmp_client_poll(c, window_end - now);
+        if (rc == EOK || rc == ETIMEDOUT) {
+            continue;
+        }
+        if (rc == ESRCH || !qmp_client_is_connected(c)) {
+            LOGF("monitor: server gone (rc=%d), reconnecting", rc);
+            rc = qmp_client_reconnect(c);
+            LOGF("monitor: qmp_client_reconnect -> %d (%s) generation=%" PRIu32, rc, strerror(rc),
+                 qmp_client_server_generation(c));
+            if (rc != EOK) {
+                msleep(50); /* keep the one-second lines coming while the server is away */
+            }
+            continue;
+        }
+        LOGF("monitor: poll failed rc=%d (%s)", rc, strerror(rc));
+        return rc;
+    }
+    printf("monitor: total=%ld dropped_total=%" PRIu64 " last_rate=%ld Hz\n", ms.total,
+           ms.total_dropped, last_rate);
+    return last_rate >= min_hz && last_rate > 0 ? EOK : ETIMEDOUT;
+}
+
 static int usage(const char *argv0) {
     fprintf(stderr,
             "usage: %s [--timeout MS] [--expect ERRNO] [--transport qnx|uds] once |"
             " stop | loop N [WARMUP] |"
             " slow MS sleep|spin | late MS | reconnect [MAX_S] |"
-            " subscribe [state|log] [N] [MAX_S] [SLOW_MS]\n",
+            " subscribe [state|log] [N] [MAX_S] [SLOW_MS] |"
+            " monitor [state|log] [SECONDS] [MIN_HZ]\n",
             argv0);
     return 2;
 }
@@ -472,6 +573,10 @@ int main(int argc, char **argv) {
         outcome = mode_subscribe(
             &c, i < argc ? argv[i] : "state", i + 1 < argc ? atol(argv[i + 1]) : 10,
             i + 2 < argc ? atol(argv[i + 2]) : 30, i + 3 < argc ? atol(argv[i + 3]) : 0);
+    } else if (strcmp(mode, "monitor") == 0) {
+        outcome =
+            mode_monitor(&c, i < argc ? argv[i] : "state", i + 1 < argc ? atol(argv[i + 1]) : 10,
+                         i + 2 < argc ? atol(argv[i + 2]) : 1);
     } else {
         outcome = OUTCOME_USAGE;
     }

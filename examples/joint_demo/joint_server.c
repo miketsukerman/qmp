@@ -14,7 +14,8 @@
  *                         [--publish-ms N] [--selftest]
  *   --threads N        worker threads, 1..QMP_SERVER_MAX_THREADS (default 2)
  *   --publish-ms N     publish the StateChanged (LATEST) and StateLog (QUEUE depth 8)
- *                      topics every N ms (1..60000; off by default). Subscribers are
+ *                      topics every N ms (1..60000; off by default; 2 = 500 Hz, paced by
+ *                      absolute deadlines so the average rate is exact). Subscribers are
  *                      notified with MsgDeliverEvent and pull the sample (ADR-003); a
  *                      slow or dead subscriber never blocks this.
  *   --verbose          log each call and reply (off by default: no fast-path logging)
@@ -33,6 +34,7 @@
  * only enabled with --verbose. Each log line is written with a single write() so lines
  * from different threads cannot interleave.
  */
+#include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <sched.h>
@@ -249,7 +251,12 @@ typedef struct pub_ctx {
 
 static void *publisher_thread(void *arg) {
     pub_ctx_t *pc = (pub_ctx_t *)arg;
-    struct timespec period = {pc->period_ms / 1000U, (long)(pc->period_ms % 1000U) * 1000000L};
+    /* Absolute deadlines: a relative sleep of N ms is rounded up by the timer tick on top of
+     * the time the publish took, which turned --publish-ms 2 into one update every 3 ms
+     * (333 Hz instead of 500 Hz) on the RPi5. Sleeping until t0 + k * period keeps the
+     * average rate exact; a tick of jitter on single updates remains. */
+    const uint64_t period_ns = (uint64_t)pc->period_ms * 1000000ULL;
+    uint64_t next = now_ns();
     while (!pc->stop) {
         demo_joint_v1_JointState st;
         memset(&st, 0, sizeof(st));
@@ -269,7 +276,14 @@ static void *publisher_thread(void *arg) {
         if (pc->state->verbose) {
             LOGF("published seq=%" PRIu64, st.seq);
         }
-        (void)nanosleep(&period, NULL);
+        next += period_ns;
+        uint64_t now = now_ns();
+        if (now > next + period_ns) {
+            next = now; /* fell behind (preempted for long): do not burst to catch up */
+        }
+        struct timespec until = {(time_t)(next / 1000000000ULL), (long)(next % 1000000000ULL)};
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, NULL) == EINTR) {
+        }
     }
     return NULL;
 }

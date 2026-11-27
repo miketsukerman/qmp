@@ -13,6 +13,22 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-27
+
+Wire version 1 · reflection version 1
+
+### Added
+- `qmp_joint_client monitor [state|log] [SECONDS] [MIN_HZ]`: a live readout with one line
+  per second (update rate, updates dropped, longest gap) that reconnects and resubscribes
+  when the server dies.
+- `scripts/target-demo.sh`: the joint demo on the target — a 500 Hz `StateChanged` stream,
+  `kill -9` of the server after 4 s, restart after 6 s — with pass/fail checks.
+
+### Fixed
+- `qmp_joint_server --publish-ms N` paces the publisher with absolute deadlines. The
+  relative sleep it used was rounded up by the timer tick, so `--publish-ms 2` delivered
+  about 333 Hz on the RPi5 instead of 500 Hz.
+
 ## [0.3.2] - 2026-11-27
 
 Wire version 1 · reflection version 1

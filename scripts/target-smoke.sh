@@ -8,7 +8,8 @@
 # Part 2 (qmp_joint_server / qmp_joint_client, generated Joint bindings): latency loop
 # against a quiet server, pidin/kernel-state capture during an in-flight call, client
 # death, server death (mid-call with reconnect, and a call made after the death),
-# priority inheritance with a spinning call, and in-flight cancellation.
+# priority inheritance with a spinning call, in-flight cancellation, and the one-way
+# Stop whose handler runs after the caller was released.
 # Part 3 (topics, ADR-003 notify-then-pull): normal delivery, a slow subscriber in
 # LATEST and QUEUE mode with explicit loss accounting, kill -9 of a subscriber
 # mid-stream, and a server restart with automatic resubscribe.
@@ -348,6 +349,36 @@ t "cat '$QMP_TARGET_DIR/jsrv6.log'" || true
 t "kill -9 $SPID 2>/dev/null || true"
 result joint-cancel "$rc"
 
+note "joint 6b: one-way Stop — accepted before the handler runs; handler at base priority"
+# The generated one-way stub returns on the receipt reply; the handler then runs with the
+# inheritance already dropped (DESIGN §3.4, V-QNX-011): server at 10, client at 30, and
+# the Stop handler must log caller_prio=30 but thread_prio=10.
+rc=0
+if [ "$HAVE_ON" -eq 1 ]; then
+    OPID=$(t "on -p 10 '$JSRV' --verbose > '$QMP_TARGET_DIR/jsrv6b.log' 2>&1 & echo \$!" | tr -d '\r')
+    track "$OPID"
+    sleep 1
+    SPID=$(t "sed -n 's/.*started pid=\([0-9]*\).*/\1/p' '$QMP_TARGET_DIR/jsrv6b.log'" | tr -d '\r')
+    SPID=${SPID:-$OPID}
+    track "$SPID"
+    t "on -p 30 '$JCLI' stop > '$QMP_TARGET_DIR/jcli6b.log' 2>&1" || rc=$?
+    t "grep -q 'recv Stop (one-way) .*caller_prio=30 thread_prio=10\$' '$QMP_TARGET_DIR/jsrv6b.log'" || rc=$?
+else
+    OPID=""
+    SPID=$(start_jsrv jsrv6b.log --verbose)
+    track "$SPID"
+    t "'$JCLI' stop > '$QMP_TARGET_DIR/jcli6b.log' 2>&1" || rc=$?
+    t "grep -q 'recv Stop (one-way)' '$QMP_TARGET_DIR/jsrv6b.log'" || rc=$?
+fi
+t "grep -q '^PASS stop' '$QMP_TARGET_DIR/jcli6b.log'" || rc=$?
+if [ "$rc" -eq 0 ]; then
+    t "'$JCLI' once > '$QMP_TARGET_DIR/jcli6b-once.log' 2>&1" || rc=$? # SetTarget clears the stop
+    t "grep -q 'mode=hold' '$QMP_TARGET_DIR/jcli6b-once.log'" || rc=$?
+fi
+t "cat '$QMP_TARGET_DIR/jcli6b.log' '$QMP_TARGET_DIR/jsrv6b.log'" || true
+t "kill -9 $SPID $OPID 2>/dev/null || true"
+result joint-oneway-stop "$rc"
+
 # ---- topic scenarios (ADR-003 notify-then-pull) --------------------------------------------
 
 note "joint 7: topics, normal delivery — 50 ms publisher, LATEST subscriber prints 20 updates"
@@ -448,6 +479,12 @@ t "cat '$QMP_TARGET_DIR/qctl8b.log'" || true
 t "grep -q '^{\"result\":' '$QMP_TARGET_DIR/qctl8b.log'" || rc=$?
 t "grep -q '\"position_rad\":1.25,' '$QMP_TARGET_DIR/qctl8b.log'" || rc=$?
 t "grep -q 'Joint.SetTarget returned status 3 (INVALID_ARGUMENT)' '$QMP_TARGET_DIR/qctl8b.log'" || rc=$?
+# One-way: no reply to print, exit 0, and the next GetState shows the handler ran.
+t "'$QCTL' call Joint Stop >> '$QMP_TARGET_DIR/qctl8b.log' 2>&1" || rc=$?
+sleep 1
+t "'$QCTL' call Joint GetState > '$QMP_TARGET_DIR/qctl8b-stop.log' 2>&1" || rc=$?
+t "cat '$QMP_TARGET_DIR/qctl8b-stop.log'" || true
+t "grep -q '\"mode\":\"stopped\"' '$QMP_TARGET_DIR/qctl8b-stop.log'" || rc=$?
 result qmpctl-call "$rc"
 
 note "qmpctl 8c: subscribe prints one JSON line per update (QUEUE topic, nothing dropped)"

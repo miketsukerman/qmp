@@ -66,9 +66,20 @@ def test_header_contains_identifiers_and_asserts(joint: GenResult) -> None:
     assert "QMP_STATIC_ASSERT(offsetof(demo_joint_v1_JointState, mode) == 24" in h
     assert "uint8_t _pad0[6];" in h
     assert 'extern "C"' in h
-    # one-way and topics are declared but have no stubs in W1
-    assert "demo_joint_v1_Joint_Stop(" not in h
-    assert "int (*Stop)(void *ctx, const qmp_req_info_t *info)" in h
+    # one-way: a stub without reply or status, and a handler that gets the caller's info
+    assert "int demo_joint_v1_Joint_Stop(qmp_client_t *c);" in h
+    assert "int demo_joint_v1_Joint_Stop_ex(qmp_client_t *c,\n" in h
+    assert "int (*Stop)(void *ctx, const qmp_req_info_t *info); /* one-way */" in h
+
+
+def test_oneway_method_is_dispatched(joint: GenResult) -> None:
+    c = joint.files["joint.qmp.c"]
+    assert "NULL /* one-way" not in c
+    assert "return ops->Stop(ctx, &info);" in c
+    assert "return qmp_client_oneway(c, DEMO_JOINT_V1_JOINT_M_STOP, NULL, 0, opts);" in c
+    # descriptor entry: flagged one-way and wired to its trampoline
+    entry = c[c.index("DEMO_JOINT_V1_JOINT_M_STOP,\n        QMP_MF_ONEWAY") :]
+    assert "demo_joint_v1_Joint_tr_Stop," in entry[: entry.index("},")]
 
 
 def test_source_embeds_reflection_blob(joint: GenResult) -> None:

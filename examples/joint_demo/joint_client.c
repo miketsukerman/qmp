@@ -8,6 +8,9 @@
  *   once                   one SetTarget + GetState round trip, print the state
  *   loop N [WARMUP]        WARMUP uncounted SetTarget calls (default 100), then N timed
  *                          ones; print min/median/p99/max latency in microseconds
+ *   stop                   one-way Stop: returns once the server accepted it, then poll
+ *                          GetState until the handler (which runs after the caller was
+ *                          released) has switched the mode to "stopped"
  *   slow MS sleep|spin     one Burn call that keeps a server worker busy for MS ms
  *   late MS                connect, sleep MS ms (the harness kills the server meanwhile),
  *                          then make one GetState call and report its errno
@@ -164,6 +167,35 @@ static int mode_once(qmp_client_t *c) {
 /* Latency in microseconds with one decimal, from nanoseconds. */
 #define US_FMT       "%" PRIu64 ".%" PRIu64 "us"
 #define US_ARGS(ns_) (uint64_t)((ns_) / 1000U), (uint64_t)(((ns_) % 1000U) / 100U)
+
+/* One-way Stop. EOK from the stub only means "accepted": the handler runs afterwards, so
+ * its effect is observed by polling GetState (bounded to about one second). */
+static int mode_stop(qmp_client_t *c) {
+    uint64_t t0 = now_ns();
+    int rc = demo_joint_v1_Joint_Stop(c);
+    uint64_t dt = now_ns() - t0;
+    if (rc != EOK) {
+        LOGF("Stop failed rc=%d (%s)", rc, strerror(rc));
+        return rc;
+    }
+    for (int tries = 0; tries < 100; tries++) {
+        demo_joint_v1_JointState st;
+        int32_t status = 0;
+        rc = demo_joint_v1_Joint_GetState(c, &st, &status);
+        if (rc != EOK || status != 0) {
+            LOGF("GetState failed rc=%d (%s) status=%" PRId32, rc, strerror(rc), status);
+            return rc != EOK ? rc : OUTCOME_STATUS;
+        }
+        if (st.mode.len == 7 && memcmp(st.mode.data, "stopped", 7) == 0) {
+            printf("stop: accepted in " US_FMT ", mode=stopped after %d GetState poll(s)\n",
+                   US_ARGS(dt), tries + 1);
+            return EOK;
+        }
+        msleep(10);
+    }
+    LOGF("stop: accepted, but the mode never became \"stopped\"");
+    return ETIMEDOUT;
+}
 
 static int mode_loop(qmp_client_t *c, long n, long warmup) {
     if (n < 1 || n > LOOP_MAX || warmup < 0 || warmup > LOOP_MAX) {
@@ -365,7 +397,7 @@ static int mode_subscribe(qmp_client_t *c, const char *topic, long want, long ma
 static int usage(const char *argv0) {
     fprintf(stderr,
             "usage: %s [--timeout MS] [--expect ERRNO] [--transport qnx|uds] once |"
-            " loop N [WARMUP] |"
+            " stop | loop N [WARMUP] |"
             " slow MS sleep|spin | late MS | reconnect [MAX_S] |"
             " subscribe [state|log] [N] [MAX_S] [SLOW_MS]\n",
             argv0);
@@ -426,6 +458,8 @@ int main(int argc, char **argv) {
     int outcome;
     if (strcmp(mode, "once") == 0) {
         outcome = mode_once(&c);
+    } else if (strcmp(mode, "stop") == 0) {
+        outcome = mode_stop(&c);
     } else if (strcmp(mode, "loop") == 0 && i < argc) {
         outcome = mode_loop(&c, atol(argv[i]), i + 1 < argc ? atol(argv[i + 1]) : 100);
     } else if (strcmp(mode, "slow") == 0 && i + 1 < argc) {

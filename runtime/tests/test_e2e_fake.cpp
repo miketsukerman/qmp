@@ -48,7 +48,18 @@ struct JointModel {
     int32_t next_status = 0; /* app error injection */
     int next_errno = 0;      /* transport error injection */
     bool oversize_mode = false;
+    std::atomic<int> stops{0}; /* one-way Stop handler runs */
+    std::atomic<int> stop_up_priority{-1};
+    std::atomic<int32_t> stop_pid{-1};
 };
+
+int on_stop(void *ctx, const qmp_req_info_t *info) {
+    auto *m = static_cast<JointModel *>(ctx);
+    m->stop_up_priority = info->up_priority;
+    m->stop_pid = info->pid;
+    m->stops++;
+    return QMP_HANDLED;
+}
 
 int on_set_target(void *ctx, qmp_req_t *req, const demo_joint_v1_SetTargetRequest *in,
                   demo_joint_v1_SetTargetReply *out, int32_t *status) {
@@ -105,9 +116,11 @@ class E2E : public ::testing::Test {
     JointModel model_;
     demo_joint_v1_Joint_ops ops_{};
     std::thread runner_;
+    bool with_stop_ = true;
 
     void SetUp() override {
         ops_.SetTarget = on_set_target;
+        ops_.Stop = with_stop_ ? on_stop : nullptr;
         ops_.GetState = on_get_state;
         qmp_server_cfg_t cfg =
             server_cfg(qmp_transport_fake(), kThreads, workbuf_, sizeof(workbuf_));
@@ -203,17 +216,57 @@ TEST_F(E2E, HandlerErrnoBecomesTransportError) {
     qmp_client_close(&c);
 }
 
-TEST_F(E2E, UnknownMethodAndOnewayPlaceholder) {
+TEST_F(E2E, UnknownMethodAndOnewayFlagMismatch) {
     qmp_client_t c;
     connect(c);
     int32_t status = 0;
     EXPECT_EQ(qmp_client_call(&c, 0x0042, nullptr, 0, nullptr, 0, &status, nullptr), ENOENT);
+    /* Stop is declared one-way: a plain call to it is refused, and so is a one-way send
+     * to a method that is not one-way. */
     EXPECT_EQ(
         qmp_client_call(&c, DEMO_JOINT_V1_JOINT_M_STOP, nullptr, 0, nullptr, 0, &status, nullptr),
-        ENOSYS);
+        EINVAL);
+    EXPECT_EQ(qmp_client_oneway(&c, DEMO_JOINT_V1_JOINT_M_GETSTATE, nullptr, 0, nullptr), EINVAL);
+    EXPECT_EQ(model_.stops.load(), 0);
     EXPECT_EQ(qmp_client_call(&c, DEMO_JOINT_V1_JOINT_T_STATECHANGED, nullptr, 0, nullptr, 0,
                               &status, nullptr),
               ENOENT);
+    qmp_client_close(&c);
+}
+
+TEST_F(E2E, GeneratedOnewayStubRunsTheHandlerAfterTheReply) {
+    qmp_client_t c;
+    connect(c);
+    EXPECT_EQ(demo_joint_v1_Joint_Stop(&c), EOK);
+    qmp_call_opts_t opts{};
+    opts.up_priority = 5;
+    EXPECT_EQ(demo_joint_v1_Joint_Stop_ex(&c, &opts), EOK);
+    /* EOK means "accepted": the handler runs after the receipt reply, so wait for it. */
+    for (int i = 0; i < 2000 && model_.stops.load() < 2; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(model_.stops.load(), 2);
+    EXPECT_EQ(model_.stop_up_priority.load(), 5);
+    EXPECT_EQ(model_.stop_pid.load(), static_cast<int32_t>(getpid()));
+    /* The connection is still usable for ordinary calls. */
+    demo_joint_v1_JointState st{};
+    int32_t status = -1;
+    EXPECT_EQ(demo_joint_v1_Joint_GetState(&c, &st, &status), EOK);
+    EXPECT_EQ(status, 0);
+    qmp_client_close(&c);
+}
+
+TEST_F(E2E, OnewayWithoutAHandlerIsAcceptedAndDropped) {
+    TearDown();
+    with_stop_ = false;
+    SetUp();
+    qmp_client_t c;
+    connect(c);
+    EXPECT_EQ(demo_joint_v1_Joint_Stop(&c), EOK);
+    demo_joint_v1_JointState st{};
+    int32_t status = -1;
+    EXPECT_EQ(demo_joint_v1_Joint_GetState(&c, &st, &status), EOK);
+    EXPECT_EQ(model_.stops.load(), 0);
     qmp_client_close(&c);
 }
 

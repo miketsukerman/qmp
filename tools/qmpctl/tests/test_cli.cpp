@@ -109,7 +109,6 @@ struct Kitchen {
     std::atomic<int> pings{0};
     std::atomic<int> echoes{0};
     qmp_service_desc_t desc = qmp_test_kitchen_v1_Kitchen_desc;
-    std::vector<qmp_method_desc_t> methods{desc.methods, desc.methods + desc.nmethods};
     qmp_test_kitchen_v1_Kitchen_ops ops{};
 
     static int echo(void *ctx, qmp_req_t *, const qmp_test_kitchen_v1_Sink *in,
@@ -131,13 +130,11 @@ struct Kitchen {
         static_cast<Kitchen *>(ctx)->pings++;
         return QMP_HANDLED;
     }
-    // protoc-gen-qmp does not emit one-way trampolines yet (the generated descriptor
-    // leaves the handler NULL, so the call would fail with ENOSYS). The runtime supports
-    // them, so the test installs its own to exercise qmpctl's one-way path end to end.
-    static int fire(const void *, void *ctx, qmp_req_t *, const void *in, void *, int32_t *) {
+    // One-way with a payload: the generated handler gets the caller's info and the request.
+    static int fire(void *ctx, const qmp_req_info_t *, const qmp_test_kitchen_v1_Inner *in) {
         auto *k = static_cast<Kitchen *>(ctx);
         std::lock_guard<std::mutex> lk(k->mu);
-        k->fired.push_back(static_cast<const qmp_test_kitchen_v1_Inner *>(in)->a);
+        k->fired.push_back(in->a);
         return QMP_HANDLED;
     }
     static int publish(void *ctx, qmp_req_t *, const qmp_test_kitchen_v1_Inner *in, int32_t *) {
@@ -166,12 +163,7 @@ struct Kitchen {
         ops.Echo = echo;
         ops.Fail = fail;
         ops.Ping = ping;
-        for (qmp_method_desc_t &m : methods) {
-            if (m.id == QMP_TEST_KITCHEN_V1_KITCHEN_M_FIRE) {
-                m.handler = fire;
-            }
-        }
-        desc.methods = methods.data();
+        ops.Fire = fire;
         ops.Publish = publish;
         constexpr int kThreads = 2;
         workbuf.assign(

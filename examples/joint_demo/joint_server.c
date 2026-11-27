@@ -4,9 +4,10 @@
  *
  * Registers one instance of demo.joint.v1.Joint over the default transport (native QNX
  * message passing on target) and serves until SIGTERM/SIGINT. Implements SetTarget and
- * GetState trivially plus Burn, a slow method that keeps the handler busy (sleeping or
- * CPU-spinning) so real kernel behaviour — REPLY-blocked clients, priority inheritance —
- * can be observed with pidin. Companion client: joint_client.c; orchestration:
+ * GetState trivially, the one-way Stop (mode becomes "stopped" until the next SetTarget;
+ * its handler runs after the caller was released) plus Burn, a slow method that keeps the handler
+ * busy (sleeping or CPU-spinning) so real kernel behaviour — REPLY-blocked clients, priority
+ * inheritance — can be observed with pidin. Companion client: joint_client.c; orchestration:
  * scripts/target-smoke.sh.
  *
  * Usage: qmp_joint_server [--threads N] [--verbose] [--transport NAME] [--fixed-priority]
@@ -86,7 +87,14 @@ typedef struct srv_state {
     float position_rad;
     uint64_t seq;
     int verbose;
+    volatile sig_atomic_t stopped; /* set by the one-way Stop, cleared by SetTarget */
 } srv_state_t;
+
+static void fill_mode(const srv_state_t *sv, demo_joint_v1_JointState *st) {
+    const char *mode = sv->stopped ? "stopped" : "hold";
+    st->mode.len = (uint16_t)strlen(mode);
+    memcpy(st->mode.data, mode, st->mode.len);
+}
 
 static int thread_priority(void) {
     struct sched_param sp;
@@ -126,6 +134,7 @@ static int on_set_target(void *ctx, qmp_req_t *req, const demo_joint_v1_SetTarge
     } else {
         sv->target_rad = in->position_rad;
         sv->position_rad = in->position_rad; /* ideal actuator: arrives instantly */
+        sv->stopped = 0;
         sv->seq++;
         out->result = 0;
         *status = 0;
@@ -141,11 +150,21 @@ static int on_get_state(void *ctx, qmp_req_t *req, demo_joint_v1_JointState *out
     out->timestamp_ns = now_ns();
     out->position_rad = sv->position_rad;
     out->velocity = 0.0f;
-    static const char mode[] = "hold";
-    out->mode.len = (uint16_t)(sizeof(mode) - 1);
-    memcpy(out->mode.data, mode, sizeof(mode) - 1);
+    fill_mode(sv, out);
     *status = 0;
     log_reply(sv, "GetState", *status);
+    return QMP_HANDLED;
+}
+
+/* One-way (DESIGN §3.4): the client was released before this runs, so the worker is back
+ * at its base priority and there is nothing to reply. Logged unconditionally: a stop is a
+ * state change, not fast-path traffic. */
+static int on_stop(void *ctx, const qmp_req_info_t *info) {
+    srv_state_t *sv = (srv_state_t *)ctx;
+    sv->target_rad = sv->position_rad;
+    sv->stopped = 1;
+    LOGF("recv Stop (one-way) client_pid=%" PRId32 " caller_prio=%" PRId32 " thread_prio=%d",
+         info->pid, info->priority, thread_priority());
     return QMP_HANDLED;
 }
 
@@ -231,7 +250,6 @@ typedef struct pub_ctx {
 static void *publisher_thread(void *arg) {
     pub_ctx_t *pc = (pub_ctx_t *)arg;
     struct timespec period = {pc->period_ms / 1000U, (long)(pc->period_ms % 1000U) * 1000000L};
-    static const char mode[] = "hold";
     while (!pc->stop) {
         demo_joint_v1_JointState st;
         memset(&st, 0, sizeof(st));
@@ -239,8 +257,7 @@ static void *publisher_thread(void *arg) {
         st.timestamp_ns = now_ns();
         st.position_rad = pc->state->position_rad;
         st.velocity = 0.0f;
-        st.mode.len = (uint16_t)(sizeof(mode) - 1);
-        memcpy(st.mode.data, mode, sizeof(mode) - 1);
+        fill_mode(pc->state, &st);
         int rc = demo_joint_v1_Joint_publish_StateChanged(pc->server, &st);
         if (rc == EOK) {
             rc = demo_joint_v1_Joint_publish_StateLog(pc->server, &st);
@@ -292,6 +309,9 @@ static void *selftest_client(void *arg) {
     demo_joint_v1_BurnReply brep;
     if (rc == EOK) {
         rc = demo_joint_v1_Joint_SetTarget(&c, &req, &rep, &status);
+    }
+    if (rc == EOK && status == 0) {
+        rc = demo_joint_v1_Joint_Stop(&c);
     }
     if (rc == EOK && status == 0) {
         rc = demo_joint_v1_Joint_GetState(&c, &st, &status);
@@ -388,10 +408,11 @@ int main(int argc, char **argv) {
     sigaddset(&sc.set, SIGTERM);
     (void)pthread_sigmask(SIG_BLOCK, &sc.set, NULL);
 
-    srv_state_t state = {0.0f, 0.0f, 0, verbose};
+    srv_state_t state = {0.0f, 0.0f, 0, verbose, 0};
     demo_joint_v1_Joint_ops ops;
     memset(&ops, 0, sizeof(ops));
     ops.SetTarget = on_set_target;
+    ops.Stop = on_stop;
     ops.GetState = on_get_state;
     ops.Burn = on_burn;
 

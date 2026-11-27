@@ -66,8 +66,27 @@ TEST(Dispatch, LookupErrors) {
     EXPECT_EQ(qmp_dispatch_lookup(&demo_joint_v1_Joint_desc, 0, &h, &m), ENOENT);
     h = hdr(DEMO_JOINT_V1_JOINT_M_SETTARGET, 4);
     EXPECT_EQ(qmp_dispatch_lookup(&demo_joint_v1_Joint_desc, 0, &h, &m), EINVAL);
+    /* Stop is one-way: the header flag must agree with the declaration. */
     h = hdr(DEMO_JOINT_V1_JOINT_M_STOP, 0);
-    EXPECT_EQ(qmp_dispatch_lookup(&demo_joint_v1_Joint_desc, 0, &h, &m), ENOSYS);
+    EXPECT_EQ(qmp_dispatch_lookup(&demo_joint_v1_Joint_desc, 0, &h, &m), EINVAL);
+    EXPECT_EQ(m, nullptr);
+    h.flags = QMP_F_ONEWAY;
+    EXPECT_EQ(qmp_dispatch_lookup(&demo_joint_v1_Joint_desc, 0, &h, &m), EOK);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m->id, DEMO_JOINT_V1_JOINT_M_STOP);
+    EXPECT_NE(m->handler, nullptr);
+}
+
+TEST(Dispatch, DeclaredMethodWithoutHandlerIsENOSYS) {
+    /* A hand-written descriptor may leave a handler out; generated ones never do. */
+    qmp_method_desc_t methods[4];
+    memcpy(methods, demo_joint_v1_Joint_desc.methods, sizeof(methods));
+    methods[2].handler = nullptr;
+    qmp_service_desc_t desc = demo_joint_v1_Joint_desc;
+    desc.methods = methods;
+    const qmp_method_desc_t *m = nullptr;
+    qmp_hdr_t h = hdr(DEMO_JOINT_V1_JOINT_M_GETSTATE, 0);
+    EXPECT_EQ(qmp_dispatch_lookup(&desc, 0, &h, &m), ENOSYS);
     EXPECT_EQ(m, nullptr);
 }
 

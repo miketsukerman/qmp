@@ -214,6 +214,18 @@ def _service_ctx(
         if out_st:
             tr_args.append(f"({out_st.c_name} *)out")
         tr_args.append("status")
+        if meth.oneway:
+            # One-way (DESIGN §3.4): no reply struct and no status in either direction;
+            # the handler runs after the receipt reply and gets the caller's info by value.
+            params = ["qmp_client_t *c"]
+            args = ["c"]
+            ops_params = ["void *ctx", "const qmp_req_info_t *info"]
+            tr_args = ["ctx", "&info"]
+            if in_st:
+                params.append(f"const {in_st.c_name} *req")
+                args.append("req")
+                ops_params.append(f"const {in_st.c_name} *in")
+                tr_args.append(f"(const {in_st.c_name} *)in")
         methods.append(
             {
                 "name": meth.name,
@@ -229,9 +241,7 @@ def _service_ctx(
                 "desc_in": f"(uint32_t)sizeof({in_st.c_name})" if in_st else "0U",
                 "desc_out": f"(uint32_t)sizeof({out_st.c_name})" if out_st else "0U",
                 "desc_validate": f"{in_st.c_name}_validate" if in_st and in_st.checks else "NULL",
-                "desc_handler": "NULL /* one-way: W3 */"
-                if meth.oneway
-                else f"{prefix}_tr_{meth.name}",
+                "desc_handler": f"{prefix}_tr_{meth.name}",
                 "uuri": uuri(svc.service_id, 0, svc.ver_major, meth.method_id),
                 "oneway": meth.oneway,
                 "in": in_st.c_name if in_st else None,

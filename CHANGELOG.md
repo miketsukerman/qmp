@@ -13,6 +13,26 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-27
+
+Wire version 1 · reflection version 1
+
+### Added
+- `protoc-gen-qmp` generates one-way methods end to end: a client stub
+  `<svc>_<Method>(c[, req])` with an `_ex` form taking call options, and a server trampoline
+  that calls `ops-><Method>(ctx, info[, in])` after the receipt reply. Until now the
+  descriptor carried a NULL handler and the call failed with `ENOSYS`.
+- Joint demo: the server implements `Stop` (mode `stopped` until the next `SetTarget`) and
+  `qmp_joint_client stop` sends it.
+- `scripts/target-smoke.sh`: scenario `joint 6b` checks on the target that the one-way
+  handler runs at the worker's base priority after the caller was released (V-QNX-011),
+  and the `qmpctl` call scenario sends `Stop`.
+
+### Changed
+- The ops-table member of a one-way method that has a request payload now receives it:
+  `int (*M)(void *ctx, const qmp_req_info_t *info, const <Request> *in)`. No such handler
+  could be called before this release.
+
 ## [0.3.0] - 2026-11-27
 
 Wire version 1 · reflection version 1

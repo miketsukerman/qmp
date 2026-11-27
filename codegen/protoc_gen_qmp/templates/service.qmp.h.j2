@@ -103,7 +103,12 @@ int {{ svc.prefix }}_{{ m.name }}_ex({{ m.params | wrap }},
     const qmp_call_opts_t *opts);
 {% endfor %}
 {% for m in svc.methods if m.oneway %}
-/* {{ m.name }}: one-way method (qmp.oneway); client stub and server dispatch arrive in W3. */
+/* {{ m.name }}: one-way method (qmp.oneway). Returns EOK once the server has accepted the
+ * request, before its handler runs; there is no reply payload and no status. Delivery
+ * failures return an errno (ETIMEDOUT, ESRCH, EACCES, ...). */
+int {{ svc.prefix }}_{{ m.name }}({{ m.params | wrap }});
+int {{ svc.prefix }}_{{ m.name }}_ex({{ m.params | wrap }},
+    const qmp_call_opts_t *opts);
 {% endfor %}
 {% for t in svc.topics %}
 /* topic {{ t.name }} (0x{{ "%04X" | format(t.id) }}, {{ t.mode }}{% if t.depth %} depth {{ t.depth }}{% endif %}, sample {{ t.c_type }}).
@@ -129,15 +134,14 @@ int {{ svc.prefix }}_unsubscribe_{{ t.name }}(qmp_client_t *c,
 
 /* ---- server ------------------------------------------------------------ */
 /* Handlers run on a libqmp worker thread at the CALLER's priority (inherited).
- * Return QMP_HANDLED (reply with *out and *status), QMP_DEFERRED (W2) or a positive errno
- * (the runtime sends MsgError and the client sees that errno). */
+ * Return QMP_HANDLED (reply with *out and *status), QMP_DEFERRED or a positive errno
+ * (the runtime sends MsgError and the client sees that errno).
+ * One-way handlers run AFTER the client has been released, at the worker's base priority;
+ * their return value is ignored and an unset handler drops the request. */
 typedef struct {{ svc.prefix }}_ops {
 {% for m in svc.methods %}
-{% if m.oneway %}
-    int (*{{ m.name }})(void *ctx, const qmp_req_info_t *info); /* one-way, after reply (W3) */
-{% else %}
-    int (*{{ m.name }})({{ m.ops_params | wrap(8) }});
-{% endif %}
+    int (*{{ m.name }})({{ m.ops_params | wrap(8) }});{{ " /* one-way */" if m.oneway }}
+
 {% endfor %}
     void (*on_cancel)(void *ctx, qmp_req_t *req);   /* deferred req unblocked (W2), optional */
     void (*on_client_gone)(void *ctx, int32_t pid); /* client process gone (W2), optional    */

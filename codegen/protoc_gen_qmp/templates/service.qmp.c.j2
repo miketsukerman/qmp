@@ -45,6 +45,27 @@ static int {{ svc.prefix }}_tr_{{ m.name }}(const void *ops_, void *ctx, qmp_req
 }
 
 {% endfor %}
+{% for m in svc.methods if m.oneway %}
+/* One-way: the receipt reply is already sent, so out and status are unused. */
+static int {{ svc.prefix }}_tr_{{ m.name }}(const void *ops_, void *ctx, qmp_req_t *req,
+    const void *in, void *out, int32_t *status) {
+    const {{ svc.prefix }}_ops *ops = (const {{ svc.prefix }}_ops *)ops_;
+    qmp_req_info_t info;
+{% if not m.in %}
+    (void)in;
+{% endif %}
+    (void)out;
+    (void)status;
+    if (ops->{{ m.name }} == NULL) {
+        return ENOSYS;
+    }
+    if (qmp_req_get_info(req, &info) != EOK) {
+        return EINVAL;
+    }
+    return ops->{{ m.name }}({{ m.tr_args | wrap(8, 60) }});
+}
+
+{% endfor %}
 static const qmp_method_desc_t {{ svc.prefix }}_methods[] = {
 {% for m in svc.methods %}
     {
@@ -125,6 +146,17 @@ int {{ svc.prefix }}_{{ m.name }}_ex({{ m.params | wrap }},
     const qmp_call_opts_t *opts) {
     return qmp_client_call(c, {{ svc.macro }}_M_{{ m.upper }}, {{ m.call_req }}, {{ m.call_rep }},
                            status, opts);
+}
+
+int {{ svc.prefix }}_{{ m.name }}({{ m.params | wrap }}) {
+    return {{ svc.prefix }}_{{ m.name }}_ex({{ m.args | wrap(8, 60) }}, NULL);
+}
+
+{% endfor %}
+{% for m in svc.methods if m.oneway %}
+int {{ svc.prefix }}_{{ m.name }}_ex({{ m.params | wrap }},
+    const qmp_call_opts_t *opts) {
+    return qmp_client_oneway(c, {{ svc.macro }}_M_{{ m.upper }}, {{ m.call_req }}, opts);
 }
 
 int {{ svc.prefix }}_{{ m.name }}({{ m.params | wrap }}) {

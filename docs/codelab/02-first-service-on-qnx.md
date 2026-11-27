@@ -73,9 +73,9 @@ ssh $QMP_TARGET ls -l /dev/name/local/qmp/
 # 0101-0000/v1
 ```
 
-(There is no standalone demo client binary yet — `qmpctl` is a later milestone. The calls
-against a real server happen in the next two sections, and `qmp_smoke echo` is a minimal
-client you can read as a template.)
+(To poke the running server from a shell, use `qmpctl list` / `qmpctl call Joint GetState` —
+see [Codelab 04](04-inspect-with-qmpctl.md). The calls made from C happen in the next two
+sections, and `qmp_smoke echo` is a minimal client you can read as a template.)
 
 What you can't see on the host but is happening here: the server worker thread runs at the
 *client's* priority for the duration of each call (`pidin -p joint_service threads` while a

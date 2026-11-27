@@ -68,10 +68,11 @@ only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 | `protoc-gen-qmp` | sync methods: validated schema → C11 layouts with static asserts, ids, UUri constants, client stubs, ops table, reflection JSON. C++17 wrappers (`*.qmp.hpp`) and secpol emitter: not yet |
 | `libqmp` core | header codec, UCode mapping, dispatch, version handshake, caller-provided storage; deferred replies (fixed pool), one-way calls, client timeouts with in-flight cancellation, disconnect/server-death lifecycle with reconnect, `acl_check` hook on kernel credentials; topics (notify-then-pull, LATEST/QUEUE with loss accounting, resubscribe on restart) |
 | transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events); `uds` (`AF_UNIX`/`SOCK_SEQPACKET`, host default, also built on QNX) for benchmarks and host integration tests only — **no priority inheritance** (ADR-004) |
+| tools | `qmpctl list \| describe \| call \| subscribe`: C++17, links only the C ABI, no generated code — every generated service serves its own reflection JSON (`QMP_OP_REFLECT`, ADR-010) and qmpctl converts JSON ⇄ fixed-layout payloads from it ([Codelab 04](docs/codelab/04-inspect-with-qmpctl.md)) |
 | examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
-| tests | 86 GoogleTest cases (21 over UDS, including two-process kill -9 scenarios) + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
+| tests | 122 GoogleTest cases: 88 in `qmp_core_tests` (22 over UDS, including two-process kill -9 scenarios) and 34 in `qmpctl_tests` (JSON codec checked against generated structs; commands run against live servers) + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
 | on target | RPi5, build `a4230da3880c` (2026-11-27): 86/86 GoogleTest cases (21 over UDS), 18/18 `scripts/target-smoke.sh` scenarios, joint demo over `--transport uds` and `qnx`; results recorded in [docs/VERIFY.md](docs/VERIFY.md). Same-board round trip, `loop 5000` with a 5 s timeout: native median 4.0 µs / p99 5.7 µs, UDS median 57.8 µs / p99 68.5 µs (a first look, not the W4 benchmark) |
-| next | qmpctl, C++ wrappers (W3); bench, secpol generation, uProtocol adapter (W4, adapter is stretch) |
+| next | bench, secpol generation, uProtocol adapter (W4, adapter is stretch); C++ wrappers and one-way trampolines in the generator (stretch) |
 
 ## Build from a clean machine (Ubuntu 24.04, host build)
 
@@ -91,12 +92,30 @@ ctest --test-dir build/host-debug --output-on-failure
 Expected tail of the `ctest` output:
 
 ```
-100% tests passed, 0 tests failed out of 66
+100% tests passed, 0 tests failed out of 123
 ```
 
 Generated bindings for the example service land in `build/host-debug/gen/joint/`
-(`joint.qmp.h`, `joint.qmp.c`, `joint.reflect.json`). GoogleTest is fetched with
-`FetchContent` on first configure (network needed once).
+(`joint.qmp.h`, `joint.qmp.c`, `joint.reflect.json`). GoogleTest and nlohmann/json (qmpctl
+only) are fetched with `FetchContent` on first configure (network needed once);
+`-DQMP_BUILD_TOOLS=OFF` builds without qmpctl and without the JSON dependency.
+
+### Try it: qmpctl against the demo server
+
+```sh
+export QMP_UDS_DIR=$(mktemp -d)
+build/host-debug/examples/joint_demo/qmp_joint_server --publish-ms 50 &
+alias qmpctl=$PWD/build/host-debug/tools/qmpctl/qmpctl
+
+qmpctl list                                   # what is registered on this node
+qmpctl describe Joint                         # interface, read from the running service
+qmpctl call Joint SetTarget position_rad=1.5 max_velocity=2
+qmpctl call Joint GetState --pretty
+qmpctl subscribe Joint StateChanged --count 3 # one JSON line per update
+```
+
+On the QNX target the same commands run over native message passing; `list` walks
+`/dev/name/local/qmp`.
 
 ### Codegen tests and lint
 
@@ -105,7 +124,7 @@ cd codegen
 python3 -m pytest tests -q            # goldens, one fixture per validation error, C11/C++17 compile
 ruff check . && ruff format --check . && mypy --strict protoc_gen_qmp tests
 cd ..
-clang-format --dry-run -Werror $(git ls-files 'include/**/*.h' 'runtime/**/*.[ch]' 'runtime/**/*.cpp' 'examples/**/*.c')
+clang-format --dry-run -Werror $(git ls-files 'include/**/*.h' 'runtime/**/*.[ch]' 'runtime/**/*.cpp' 'examples/**/*.c' 'tools/**/*.[ch]pp')
 clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c runtime/transport/uds/*.c
 cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability --std=c11 \
          -Iinclude runtime/core runtime/transport/fake runtime/transport/uds examples/joint_demo/joint_server.c
@@ -142,14 +161,16 @@ cmake --build build/qnx-aarch64le
 ```
 
 On QNX the runtime links the native transport (`runtime/transport/qnx/`); the target build
-produces the core tests, `qmp_joint_server`/`qmp_joint_client` and `qmp_smoke`. Set
+produces the core tests, `qmp_joint_server`/`qmp_joint_client`, `qmp_smoke`, `qmpctl` and its
+tests. Set
 `QMP_TARGET` to the board's SSH address, then copy and run one binary with
 `scripts/target-run.sh`, or run every two-process scenario (timeouts, client/server death,
-priority inheritance, cancellation, topics) with `scripts/target-smoke.sh`:
+priority inheritance, cancellation, topics, qmpctl) with `scripts/target-smoke.sh`:
 
 ```sh
 export QMP_TARGET=qnxuser@<pi5-address>
 scripts/target-run.sh runtime/tests/qmp_core_tests
+scripts/target-run.sh tools/qmpctl/tests/qmpctl_tests
 scripts/target-smoke.sh
 ```
 
@@ -171,6 +192,7 @@ runtime/tests/        GoogleTest suites over the fake and uds transports
 examples/joint_demo/  qmp_joint_server / qmp_joint_client: Joint actuator service in C
                       (--selftest on host; publisher/subscriber modes for topics)
 examples/smoke/       qmp_smoke: hand-written service for target edge-case scenarios
+tools/qmpctl/         qmpctl: list/describe/call/subscribe from reflection data (C++17, C ABI only)
 scripts/              target-run.sh, target-smoke.sh (SSH to the QNX board)
 cmake/                presets support, qnx-*.cmake toolchains, QmpCodegen.cmake
 docs/                 DESIGN, DECISIONS (ADRs), VERIFY register, codelab, spikes

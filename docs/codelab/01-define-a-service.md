@@ -116,8 +116,9 @@ Layout is computed by the generator (field-number order, natural alignment, size
 8) and then *asserted* by the compiler, so a C client and a C++ server can never disagree about
 bytes. The same header compiles as C11 and as C++17.
 
-`joint.reflect.json` carries the same information for tools (`qmpctl`, W3) and is also embedded
-in `joint.qmp.c` as `demo_joint_v1_Joint_reflect_json`.
+`joint.reflect.json` carries the same information for tools (`qmpctl`, Codelab 04) and is also
+embedded in `joint.qmp.c` as `demo_joint_v1_Joint_reflect_json`; a running service hands it to
+tools on request.
 
 ## 3. Implement the server in C
 

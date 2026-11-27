@@ -12,6 +12,9 @@
 # Part 3 (topics, ADR-003 notify-then-pull): normal delivery, a slow subscriber in
 # LATEST and QUEUE mode with explicit loss accounting, kill -9 of a subscriber
 # mid-stream, and a server restart with automatic resubscribe.
+# Part 4 (qmpctl, when it was built): list/describe from the service's own reflection
+# data, method calls with JSON arguments including an application error, a subscription
+# printed as JSON lines, and a subscription that survives a server restart.
 #
 # Usage:   scripts/target-smoke.sh
 # Example: QMP_TARGET=qnxuser@192.168.1.50 scripts/target-smoke.sh
@@ -36,6 +39,9 @@ JSRV="$QMP_TARGET_DIR/qmp_joint_server"
 JCLI="$QMP_TARGET_DIR/qmp_joint_client"
 local_jsrv="$QMP_BUILD_DIR/examples/joint_demo/qmp_joint_server"
 local_jcli="$QMP_BUILD_DIR/examples/joint_demo/qmp_joint_client"
+
+QCTL="$QMP_TARGET_DIR/qmpctl"
+local_qctl="$QMP_BUILD_DIR/tools/qmpctl/qmpctl"
 
 for f in "$local_bin" "$local_jsrv" "$local_jcli"; do
     if [ ! -f "$f" ]; then
@@ -67,7 +73,7 @@ t "mkdir -p '$QMP_TARGET_DIR'"
 # Best-effort: kill leftovers from an interrupted run so they neither hold the
 # binaries' text segments (scp would fail with ETXTBSY) nor squat on the service
 # name. slay may be missing on a minimal image; the rename below still protects us.
-t "slay -f -9 qmp_smoke qmp_joint_server qmp_joint_client 2>/dev/null; true" || true
+t "slay -f -9 qmp_smoke qmp_joint_server qmp_joint_client qmpctl 2>/dev/null; true" || true
 
 # Upload to a temp name and rename into place: rename() succeeds even if a stale
 # process is still executing the old binary.
@@ -80,6 +86,12 @@ push "$local_bin" "$BIN"
 push "$local_jsrv" "$JSRV"
 push "$local_jcli" "$JCLI"
 t "chmod +x '$BIN' '$JSRV' '$JCLI'"
+HAVE_QCTL=0
+if [ -f "$local_qctl" ]; then
+    push "$local_qctl" "$QCTL"
+    t "chmod +x '$QCTL'"
+    HAVE_QCTL=1
+fi
 
 # The target image is minimal: probe the utilities before relying on them.
 have() { t "command -v $1 >/dev/null 2>&1"; }
@@ -404,6 +416,73 @@ wait_for '^PASS subscribe' jcli7e.log 40 || rc=$?
 t "tail -8 '$QMP_TARGET_DIR/jcli7e.log'" || true
 result joint-topic-server-restart "$rc"
 t "kill -9 $SPID 2>/dev/null || true"
+
+# ---- qmpctl scenarios (reflection-driven CLI, no generated code in the tool) ----------------
+
+if [ "$HAVE_QCTL" -eq 1 ]; then
+
+note "qmpctl 8a: list and describe a running service from its own reflection data"
+SPID=$(start_jsrv jsrv8a.log --publish-ms 20)
+track "$SPID"
+rc=0
+t "'$QCTL' --version" || rc=$?
+t "'$QCTL' list > '$QMP_TARGET_DIR/qctl8a-list.log' 2>&1" || rc=$?
+t "cat '$QMP_TARGET_DIR/qctl8a-list.log'" || true
+t "grep -Eq '^qmp/0101-0000/v1 +demo\.joint\.Joint +1\.0 +4 +2 +/101/1' '$QMP_TARGET_DIR/qctl8a-list.log'" || rc=$?
+t "'$QCTL' describe Joint > '$QMP_TARGET_DIR/qctl8a-desc.log' 2>&1" || rc=$?
+t "cat '$QMP_TARGET_DIR/qctl8a-desc.log'" || true
+t "grep -q 'endpoint  qmp/0101-0000/v1  (transport qnx)' '$QMP_TARGET_DIR/qctl8a-desc.log'" || rc=$?
+t "grep -q '0x0003  GetState(demo.joint.v1.Empty) returns (demo.joint.v1.JointState)' '$QMP_TARGET_DIR/qctl8a-desc.log'" || rc=$?
+t "grep -q '0x8002  StateLog  demo.joint.v1.JointState  QUEUE depth 8' '$QMP_TARGET_DIR/qctl8a-desc.log'" || rc=$?
+result qmpctl-list-describe "$rc"
+
+note "qmpctl 8b: call with JSON arguments — reply, state change and application error"
+rc=0
+t "'$QCTL' call Joint SetTarget '{\"position_rad\": 1.25, \"max_velocity\": 2}' > '$QMP_TARGET_DIR/qctl8b.log' 2>&1" || rc=$?
+t "'$QCTL' call 0101 GetState >> '$QMP_TARGET_DIR/qctl8b.log' 2>&1" || rc=$?
+# max_velocity 0 is rejected by the handler: status INVALID_ARGUMENT, exit code 1.
+erc=0
+t "'$QCTL' call Joint SetTarget position_rad=3 max_velocity=0 >> '$QMP_TARGET_DIR/qctl8b.log' 2>&1" || erc=$?
+[ "$erc" -eq 1 ] || rc=1
+t "cat '$QMP_TARGET_DIR/qctl8b.log'" || true
+t "grep -q '^{\"result\":' '$QMP_TARGET_DIR/qctl8b.log'" || rc=$?
+t "grep -q '\"position_rad\":1.25,' '$QMP_TARGET_DIR/qctl8b.log'" || rc=$?
+t "grep -q 'Joint.SetTarget returned status 3 (INVALID_ARGUMENT)' '$QMP_TARGET_DIR/qctl8b.log'" || rc=$?
+result qmpctl-call "$rc"
+
+note "qmpctl 8c: subscribe prints one JSON line per update (QUEUE topic, nothing dropped)"
+rc=0
+t "'$QCTL' subscribe Joint StateLog --count 25 > '$QMP_TARGET_DIR/qctl8c.log' 2> '$QMP_TARGET_DIR/qctl8c.err'" || rc=$?
+n=$(t "grep -c '^{\"topic\":\"StateLog\",\"seq\":[0-9]*,\"dropped\":0,\"rx_ns\":[0-9]*,\"sample\":{' '$QMP_TARGET_DIR/qctl8c.log'" | tr -d '\r') || true
+[ "$n" = "25" ] || rc=1
+t "head -3 '$QMP_TARGET_DIR/qctl8c.log'; cat '$QMP_TARGET_DIR/qctl8c.err'" || true
+t "grep -q '25 updates received, 0 dropped' '$QMP_TARGET_DIR/qctl8c.err'" || rc=$?
+result qmpctl-subscribe "$rc"
+t "kill -9 $SPID 2>/dev/null || true"
+
+note "qmpctl 8d: subscribe across a server restart — reconnects and keeps printing"
+SPID=$(start_jsrv jsrv8d-a.log --publish-ms 50)
+track "$SPID"
+CPID=$(t "'$QCTL' subscribe Joint StateChanged --count 80 > '$QMP_TARGET_DIR/qctl8d.log' 2> '$QMP_TARGET_DIR/qctl8d.err' & echo \$!" | tr -d '\r')
+track "$CPID"
+sleep 2                       # a few updates have arrived on the first session
+t "kill -9 $SPID"
+sleep 2                       # qmpctl sees ESRCH and starts reconnecting
+SPID=$(start_jsrv jsrv8d-b.log --publish-ms 50)
+track "$SPID"
+rc=0
+wait_for 'reconnected \(server generation' qctl8d.err 30 || rc=$?
+wait_for '80 updates received' qctl8d.err 40 || rc=$?
+t "cat '$QMP_TARGET_DIR/qctl8d.err'" || true
+n=$(t "grep -c '^{\"topic\":\"StateChanged\"' '$QMP_TARGET_DIR/qctl8d.log'" | tr -d '\r') || true
+[ "$n" = "80" ] || rc=1
+result qmpctl-subscribe-server-restart "$rc"
+t "kill -9 $SPID 2>/dev/null || true"
+
+else
+    echo
+    echo "qmpctl not built ($local_qctl missing): skipping the qmpctl scenarios"
+fi
 
 echo
 if [ "$fails" -eq 0 ]; then

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# qmp_add_service(NAME <name> PROTO <path/to/svc.proto> [OUT_DIR <dir>] [SOURCES_VAR <var>])
+# qmp_add_service(NAME <name> PROTO <path/to/svc.proto> [OUT_DIR <dir>] [SOURCES_VAR <var>]
+#                 [IMPORT_DIRS <dir>...])
 #
 # Runs protoc with protoc-gen-qmp. Creates INTERFACE target qmp_gen_<name> exposing the
-# generated include dir and sets <var> to the generated .c source. Tool lookup:
+# generated include dir and sets <var> to the generated .c source. IMPORT_DIRS adds proto
+# search roots for a .proto that lives outside idl/. Tool lookup:
 #   protoc:          QMP_PROTOC, then `protoc` on PATH, then `python3 -m grpc_tools.protoc`
 #   protoc-gen-qmp:  QMP_PROTOC_GEN_QMP, then on PATH, then `python3 -m protoc_gen_qmp`
 #                    (dev fallback using ${PROJECT_SOURCE_DIR}/codegen on PYTHONPATH)
@@ -47,7 +49,7 @@ function(_qmp_resolve_codegen_tools)
 endfunction()
 
 function(qmp_add_service)
-  cmake_parse_arguments(ARG "" "NAME;PROTO;OUT_DIR;SOURCES_VAR" "" ${ARGN})
+  cmake_parse_arguments(ARG "" "NAME;PROTO;OUT_DIR;SOURCES_VAR" "IMPORT_DIRS" ${ARGN})
   if(NOT ARG_NAME OR NOT ARG_PROTO)
     message(FATAL_ERROR "qmp_add_service: NAME and PROTO are required")
   endif()
@@ -58,6 +60,11 @@ function(qmp_add_service)
     set(ARG_OUT_DIR "${CMAKE_BINARY_DIR}/gen/${ARG_NAME}")
   endif()
   file(MAKE_DIRECTORY "${ARG_OUT_DIR}")
+  set(_extra_imports "")
+  foreach(_dir IN LISTS ARG_IMPORT_DIRS)
+    get_filename_component(_dir_abs "${_dir}" ABSOLUTE)
+    list(APPEND _extra_imports "-I${_dir_abs}")
+  endforeach()
   set(_outputs
     "${ARG_OUT_DIR}/${_proto_stem}.qmp.h"
     "${ARG_OUT_DIR}/${_proto_stem}.qmp.c"
@@ -73,6 +80,7 @@ function(qmp_add_service)
       "--qmp_out=flat:${ARG_OUT_DIR}"
       "-I${PROJECT_SOURCE_DIR}/third_party/up-spec/up-core-api"
       "-I${PROJECT_SOURCE_DIR}/idl"
+      ${_extra_imports}
       "${_proto_abs}"
     DEPENDS "${_proto_abs}" "${PROJECT_SOURCE_DIR}/idl/qmp/options.proto" ${_plugin_sources}
     COMMENT "protoc-gen-qmp: ${ARG_PROTO}"

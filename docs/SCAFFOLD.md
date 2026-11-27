@@ -96,10 +96,10 @@ qmp/
 
 * Minimum 3.20. `project(qmp LANGUAGES C CXX)`; C standard 11 (`C_EXTENSIONS OFF`), C++ 17.
 * Options (defaults): `QMP_BUILD_TESTS=ON`, `QMP_BUILD_CPP=ON`, `QMP_BUILD_TOOLS=ON`,
-  `QMP_BUILD_BENCH=OFF`, `QMP_BUILD_ADAPTER=OFF`, `QMP_TRANSPORT_UDS=host-only ON`,
+  `QMP_BUILD_BENCH=OFF`, `QMP_BUILD_ADAPTER=OFF`, `QMP_TRANSPORT_UDS=ON` (host and QNX, bench/test only),
   `QMP_SANITIZER=none|asan|ubsan|tsan`.
-* Transport selection is automatic: `__QNX__` → qnx + fake (+ uds if io-sock present and
-  `QMP_TRANSPORT_UDS`), else uds + fake.
+* Transport selection is automatic: `__QNX__` → qnx (default) + fake + uds, else uds (default)
+  + fake. `qmp_transport_by_name("qnx"|"uds"|"fake")` selects one explicitly.
 * Targets: `qmp::core` (OBJECT), `qmp` (STATIC, default) and `qmp_shared` (SHARED, exports via
   `QMP_API` macro), `qmp::cpp` (INTERFACE), `qmp::codegen` (custom command wrapper),
   `qmp_tests`, `qmpctl`, `joint_service`, `control_loop`, `bench_*`.

@@ -36,7 +36,7 @@ jobs:
       - name: cppcheck
         run: |
           cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability \
-            --std=c11 -Iinclude runtime/core runtime/transport/fake examples/joint_demo/joint_service.c
+            --std=c11 -Iinclude runtime/core runtime/transport/fake runtime/transport/uds examples/joint_demo/joint_service.c
 
   codegen:
     runs-on: ubuntu-24.04
@@ -97,7 +97,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build protobuf-compiler libprotobuf-dev clang-tidy
       - run: cmake --preset host-debug
       - run: cmake --build build/host-debug --target qmp_test_joint
-      - run: clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c
+      - run: clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c runtime/transport/uds/*.c
 
   docs:
     runs-on: ubuntu-24.04

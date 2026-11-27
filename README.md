@@ -61,17 +61,17 @@ client, so topics use notify-then-pull over registered events. The same core
 also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
 only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Status (W2)
+## Status (W3 in progress)
 
 | Area | State |
 |------|-------|
 | `protoc-gen-qmp` | sync methods: validated schema → C11 layouts with static asserts, ids, UUri constants, client stubs, ops table, reflection JSON. C++17 wrappers (`*.qmp.hpp`) and secpol emitter: not yet |
 | `libqmp` core | header codec, UCode mapping, dispatch, version handshake, caller-provided storage; deferred replies (fixed pool), one-way calls, client timeouts with in-flight cancellation, disconnect/server-death lifecycle with reconnect, `acl_check` hook on kernel credentials; topics (notify-then-pull, LATEST/QUEUE with loss accounting, resubscribe on restart) |
-| transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events). UDS (bench only): W3 |
+| transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events); `uds` (`AF_UNIX`/`SOCK_SEQPACKET`, host default, also built on QNX) for benchmarks and host integration tests only — **no priority inheritance** (ADR-004) |
 | examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
-| tests | 65 GoogleTest cases + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
+| tests | 86 GoogleTest cases (21 over UDS, including two-process kill -9 scenarios) + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
 | on target | RPi5, build `fdf940c957a9` (2026-11-26): 65/65 GoogleTest cases, 18/18 `scripts/target-smoke.sh` scenarios; results recorded in [docs/VERIFY.md](docs/VERIFY.md) (7 confirmed, 5 partially) |
-| next | qmpctl, UDS transport, C++ wrappers (W3); bench, secpol generation, uProtocol adapter (W4, adapter is stretch) |
+| next | qmpctl, C++ wrappers (W3); bench, secpol generation, uProtocol adapter (W4, adapter is stretch) |
 
 ## Build from a clean machine (Ubuntu 24.04, host build)
 
@@ -106,9 +106,9 @@ python3 -m pytest tests -q            # goldens, one fixture per validation erro
 ruff check . && ruff format --check . && mypy --strict protoc_gen_qmp tests
 cd ..
 clang-format --dry-run -Werror $(git ls-files 'include/**/*.h' 'runtime/**/*.[ch]' 'runtime/**/*.cpp' 'examples/**/*.c')
-clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c
+clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c runtime/transport/uds/*.c
 cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability --std=c11 \
-         -Iinclude runtime/core runtime/transport/fake examples/joint_demo/joint_server.c
+         -Iinclude runtime/core runtime/transport/fake runtime/transport/uds examples/joint_demo/joint_server.c
 ```
 
 Regenerate goldens on purpose only: `UPDATE_GOLDEN=1 python3 -m pytest tests -q`, then review
@@ -166,8 +166,8 @@ third_party/up-spec/  pinned uProtocol protos (v1.5.8, Apache-2.0) — see PIN.m
 codegen/              protoc-gen-qmp (Python ≥ 3.10, Jinja2) + golden tests
 include/qmp/          public C ABI headers
 runtime/core/         libqmp, OS-independent C11
-runtime/transport/    fake (host tests), qnx (target), uds (W3, bench only)
-runtime/tests/        GoogleTest suites over the fake transport
+runtime/transport/    fake (host tests), qnx (target), uds (bench/host tests only, no priority inheritance)
+runtime/tests/        GoogleTest suites over the fake and uds transports
 examples/joint_demo/  qmp_joint_server / qmp_joint_client: Joint actuator service in C
                       (--selftest on host; publisher/subscriber modes for topics)
 examples/smoke/       qmp_smoke: hand-written service for target edge-case scenarios

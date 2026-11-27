@@ -18,8 +18,10 @@ the same generated header, the same handler and client code from Codelab 01 now 
 
 ## 1. What actually changes on QNX
 
-On the host, `qmp_transport_default()` returns the fake transport: an in-process pthread
-rendezvous that *mimics* kernel semantics. On QNX it returns
+On the host, the unit tests use the fake transport: an in-process pthread rendezvous that
+*mimics* kernel semantics. (`qmp_transport_default()` on the host is the UDS transport, which
+crosses real process boundaries over `AF_UNIX` sockets but has no priority inheritance; it is
+for benchmarks and integration tests only.) On QNX `qmp_transport_default()` returns
 `qmp_transport_qnx()` (`runtime/transport/qnx/qnx_transport.c`), and the pieces map like this:
 
 | qmp concept | host (fake) | QNX (native) |

@@ -116,6 +116,25 @@ same-box comparison). It is excluded from the public API docs, marked `QMP_TRANS
 in CMake, and does not implement topics with event semantics beyond what the benchmark needs.
 `transport/fake/` (in-process) is the unit-test transport.
 
+**Amendment 2026-11-27 (W3, implemented).** The transport is built by default on QNX as well
+(`QMP_TRANSPORT_UDS=ON`, links `libsocket`), because the W4 priority-inversion benchmark compares
+both transports on the same board. Native message passing stays `qmp_transport_default()` on QNX;
+on the host the default is now UDS, so examples and integration tests cross real process
+boundaries. `QMP_TRANSPORT_UDS_BENCH_ONLY` is the PUBLIC compile definition that makes
+`qmp_transport_uds()` visible. What the transport deliberately does **not** have:
+
+* **No priority inheritance.** A socket carries bytes, not scheduling context: the server thread
+  runs at its own priority whatever the waiting client's priority is, `qmp_rcv_info_t.priority`
+  is always 0 and `QMP_LISTEN_FIXED_PRIORITY` is a no-op. This is the property the benchmark
+  demonstrates, not a bug to fix.
+* No kernel unblock: timeouts are local to the client, which sends a best-effort CANCEL record
+  and discards a late reply by call id. No `receive_pulse`, so cancellation waits for an idle
+  worker.
+* No registered events or secpol: notifications are small records on a second socket of the same
+  client, dropped when its buffer is full (like a pulse that cannot queue). Topics work because
+  correctness comes from the pull cursor (ADR-003).
+* The pid is kernel-supplied only on Linux (`SO_PEERCRED`); elsewhere it is self-declared.
+
 **Consequences.** + Full CI on GitHub-hosted runners, including asan/ubsan/tsan. + Apples-to-apples
 latency/jitter numbers. − Some code paths (lifecycle pulses, inheritance) are QNX-only and can be
 exercised only in manual target runs; those are flagged in test reports as "skipped on host".

@@ -61,7 +61,7 @@ Layering inside one process, top to bottom. Each layer only calls the one below 
 | `joint.qmp.hpp` | C++17 header-only | `joint.qmp.h` | wraps the **same** structs; no copies |
 | `joint.qmp.h/.c` | C11 | `include/qmp/*.h` | ids, POD structs, stubs, dispatch table, reflection blob |
 | libqmp core | C11 | libc only | header codec, dispatch, subscription registry, deferred pool, versioning, errors |
-| libqmp transport | C11 | QNX libc (`<sys/neutrino.h>`, `<sys/dispatch.h>`) | one of: qnx, uds (host), fake (tests) |
+| libqmp transport | C11 | QNX libc (`<sys/neutrino.h>`, `<sys/dispatch.h>`) | one of: qnx, uds (bench/host tests only, **no priority inheritance**, ADR-004), fake (tests) |
 
 ---
 

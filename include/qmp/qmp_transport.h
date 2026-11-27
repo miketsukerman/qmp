@@ -136,8 +136,20 @@ const qmp_transport_t *qmp_transport_fake(void);
 int qmp_transport_fake_unblock_inject(const char *path);
 /* Native QNX message passing (runtime/transport/qnx). Only defined on __QNX__. */
 const qmp_transport_t *qmp_transport_qnx(void);
-/* qnx on __QNX__; fake on the host until the uds transport lands (W3). */
+#if defined(QMP_TRANSPORT_UDS_BENCH_ONLY)
+/* AF_UNIX/SOCK_SEQPACKET (runtime/transport/uds, ADR-004). Only defined when the library
+ * was built with QMP_TRANSPORT_UDS=ON, which is what defines this macro for consumers.
+ * BENCH AND HOST-TEST ONLY: it has NO PRIORITY INHERITANCE (the server thread never runs
+ * at the waiting client's priority; qmp_rcv_info_t.priority is always 0), no kernel
+ * registered events and no secpol. Never use it for a production service.
+ * Socket files live in $QMP_UDS_DIR (default /tmp). */
+const qmp_transport_t *qmp_transport_uds(void);
+#endif
+/* qnx on __QNX__; elsewhere uds when it was built, else fake. */
 const qmp_transport_t *qmp_transport_default(void);
+/* Look a transport up by its name ("qnx", "uds", "fake") for command-line selection in
+ * tools, examples and benchmarks. NULL when the name is unknown or not built in. */
+const qmp_transport_t *qmp_transport_by_name(const char *name);
 
 #ifdef __cplusplus
 }

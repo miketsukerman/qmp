@@ -25,10 +25,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
 else()
   set(QMP_ON_QNX OFF)
 endif()
-include(CMakeDependentOption)
-# ADR-004: UDS is a host-only bench/test transport (W3).
-cmake_dependent_option(QMP_TRANSPORT_UDS "Build the UDS bench-only transport" ON
-                       "NOT QMP_ON_QNX" OFF)
+# ADR-004: UDS is a bench and host-test transport with NO priority inheritance. It is
+# built on QNX too (io-sock) so W4 can compare both transports on the same board; native
+# message passing stays the default there.
+option(QMP_TRANSPORT_UDS "Build the UDS bench-only transport (no priority inheritance)" ON)
 
 include(QmpWarnings)
 include(QmpCodegen)

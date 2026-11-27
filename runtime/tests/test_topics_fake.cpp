@@ -261,7 +261,7 @@ const qmp_topic_desc_t kQTopics[] = {
     {kLTopic, QMP_TOPIC_LATEST, 0, 0, sizeof(QSample), 0, "LatestTopic"},
 };
 const qmp_service_desc_t kQDesc = {
-    kQSvc, 1, 0, QMP_HDR_SIZE + 72, "test.TopicsQueue", kQMethods, 1, kQTopics, 2};
+    kQSvc, 1, 0, QMP_HDR_SIZE + 72, "test.TopicsQueue", kQMethods, 1, kQTopics, 2, NULL, 0};
 
 struct QUpdate {
     QSample s;

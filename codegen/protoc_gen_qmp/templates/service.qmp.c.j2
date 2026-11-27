@@ -3,6 +3,15 @@
 #include "{{ header_name }}"
 
 #include <stddef.h>
+
+/* ---- reflection blob (UTF-8 JSON, NUL-terminated) ----------------------- */
+/* Served to tools by the runtime (QMP_OP_REFLECT) through the service descriptor. */
+static const unsigned char qmp_reflect_blob_[] = {
+{% for line in reflect_lines %}
+{{ line }}
+{% endfor %}
+    0x00,
+};
 {% for svc in services %}
 
 /* ---- service {{ svc.fqname }} {{ "-" * (60 - svc.fqname | length) }} */
@@ -82,7 +91,12 @@ const qmp_service_desc_t {{ svc.prefix }}_desc = {
     NULL,
     0U,
 {% endif %}
+    qmp_reflect_blob_,
+    {{ reflect_len }}U,
 };
+
+const unsigned char *const {{ svc.prefix }}_reflect_json = qmp_reflect_blob_;
+const size_t {{ svc.prefix }}_reflect_json_len = {{ reflect_len }}U;
 
 int {{ svc.prefix }}_register(qmp_server_t *s, uint16_t instance_id,
     const {{ svc.prefix }}_ops *ops, void *ctx) {
@@ -144,15 +158,4 @@ int {{ svc.prefix }}_unsubscribe_{{ t.name }}(qmp_client_t *c,
 }
 
 {% endfor %}
-{% endfor %}
-/* ---- reflection blob (UTF-8 JSON, NUL-terminated) ----------------------- */
-static const unsigned char qmp_reflect_blob_[] = {
-{% for line in reflect_lines %}
-{{ line }}
-{% endfor %}
-    0x00,
-};
-{% for svc in services %}
-const unsigned char *const {{ svc.prefix }}_reflect_json = qmp_reflect_blob_;
-const size_t {{ svc.prefix }}_reflect_json_len = {{ reflect_len }}U;
 {% endfor %}

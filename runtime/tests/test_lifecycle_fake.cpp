@@ -111,8 +111,8 @@ const qmp_method_desc_t kMethods[] = {
     {kMDeny, 0, sizeof(EchoIn), sizeof(EchoOut), 0, nullptr, echo_handler, "Deny"},
 };
 
-const qmp_service_desc_t kDesc = {kSvc, 1,    0, QMP_HDR_SIZE + 64, "test.Lifecycle", kMethods,
-                                  3,    NULL, 0};
+const qmp_service_desc_t kDesc = {
+    kSvc, 1, 0, QMP_HDR_SIZE + 64, "test.Lifecycle", kMethods, 3, NULL, 0, NULL, 0};
 
 class Lifecycle : public ::testing::Test {
   protected:

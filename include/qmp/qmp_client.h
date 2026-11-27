@@ -104,6 +104,16 @@ int qmp_client_unsubscribe(qmp_client_t *c, qmp_sub_t *sub);
  * qmp_client_reconnect()), EINVAL (no active subscription). timeout_ns 0 blocks forever. */
 int qmp_client_poll(qmp_client_t *c, uint64_t timeout_ns);
 
+/* ---- reflection (tools) --------------------------------------------------- */
+/* Read up to cap bytes of the service's reflection JSON starting at offset. *len receives
+ * the bytes written to buf, *total_len the size of the whole document; loop with
+ * offset += *len until offset == *total_len. The bytes are not NUL-terminated. Meant for
+ * tools (qmpctl), never for a control loop. Returns EOK, ENOTCONN, ENOSYS (the service
+ * carries no reflection data, or its runtime predates the opcode), EPROTO.
+ * Blocking: yes (one call per chunk, at most QMP_REFLECT_CHUNK_MAX bytes each). */
+int qmp_client_reflect(qmp_client_t *c, uint32_t offset, void *buf, size_t cap, uint32_t *len,
+                       uint32_t *total_len);
+
 int qmp_client_is_connected(const qmp_client_t *c);
 uint32_t qmp_client_server_generation(const qmp_client_t *c);
 uint8_t qmp_client_server_minor(const qmp_client_t *c);

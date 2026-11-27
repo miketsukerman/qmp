@@ -157,6 +157,37 @@ static void handle_control(qmp_server_impl_t *s, const qmp_rcv_info_t *info, con
         send_reply(s, info->rcvid, rh, rep + QMP_HDR_SIZE, plen);
         return;
     }
+    case QMP_OP_REFLECT: {
+        if (h->payload_len != sizeof(qmp_reflect_t)) {
+            send_error(s, info->rcvid, EINVAL);
+            return;
+        }
+        const unsigned char *blob = s->desc->reflect_json;
+        size_t total = s->desc->reflect_json_len;
+        if (blob == NULL || total == 0 || total > UINT32_MAX) {
+            send_error(s, info->rcvid, ENOSYS);
+            return;
+        }
+        qmp_reflect_t rq;
+        memcpy(&rq, payload, sizeof(rq));
+        qmp_reflect_reply_t rr = {(uint32_t)total, 0};
+        if (rq.offset < total) {
+            size_t n = total - rq.offset;
+            n = n > rq.max_len ? rq.max_len : n;
+            n = n > QMP_REFLECT_CHUNK_MAX ? QMP_REFLECT_CHUNK_MAX : n;
+            rr.len = (uint32_t)n;
+        }
+        /* The chunk is replied straight from the constant blob: it never passes through
+         * the work buffer, which is sized for the interface's messages only. */
+        qmp_hdr_init_reply(rh, h, 0, (uint32_t)sizeof(rr) + rr.len);
+        qmp_iov_t iov[3] = {
+            {rh, QMP_HDR_SIZE}, {&rr, sizeof(rr)}, {(void *)(uintptr_t)(blob + rq.offset), rr.len}};
+        int rc = s->tr->reply(&s->ep, info->rcvid, iov, rr.len > 0 ? 3 : 2);
+        if (rc != EOK && rc != ESRCH && rc != EBADF) {
+            qmp_log("reply(%lld) failed: %d", (long long)info->rcvid, rc);
+        }
+        return;
+    }
     default:
         send_error(s, info->rcvid, ENOSYS);
         return;

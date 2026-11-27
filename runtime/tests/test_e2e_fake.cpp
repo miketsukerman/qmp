@@ -10,7 +10,9 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "joint.qmp.h"
 
@@ -250,7 +252,7 @@ TEST_F(E2E, OutOfRangeStringOnTheWireIsERANGE) {
         {1, 0, sizeof(demo_joint_v1_JointState), sizeof(demo_joint_v1_SetTargetReply), 0,
          demo_joint_v1_JointState_validate, tramp, "TakeState"}};
     static const qmp_service_desc_t desc = {
-        0x0202, 1, 0, QMP_HDR_SIZE + 48, "test.Bounded", methods, 1, NULL, 0};
+        0x0202, 1, 0, QMP_HDR_SIZE + 48, "test.Bounded", methods, 1, NULL, 0, NULL, 0};
     alignas(8) unsigned char wb[QMP_SERVER_WORKBUF_SIZE(72, 1)];
     qmp_server_t s2;
     qmp_server_cfg_t cfg = server_cfg(qmp_transport_fake(), 1, wb, sizeof(wb));
@@ -270,6 +272,12 @@ TEST_F(E2E, OutOfRangeStringOnTheWireIsERANGE) {
     EXPECT_EQ(rep.result, 1);
     st.mode.len = 17;
     EXPECT_EQ(qmp_client_call(&c, 1, &st, sizeof(st), &rep, sizeof(rep), &status, nullptr), ERANGE);
+    /* A hand-written descriptor carries no reflection blob. */
+    char rbuf[64];
+    uint32_t rlen = 1;
+    uint32_t rtotal = 1;
+    EXPECT_EQ(qmp_client_reflect(&c, 0, rbuf, sizeof(rbuf), &rlen, &rtotal), ENOSYS);
+    EXPECT_EQ(rlen, 0u);
     qmp_client_close(&c);
     qmp_server_stop(&s2);
     t.join();
@@ -382,6 +390,48 @@ TEST(E2ENoServer, TimeoutWhenNobodyReceives) {
     auto dt = std::chrono::steady_clock::now() - t0;
     EXPECT_GE(dt, std::chrono::milliseconds(15));
     EXPECT_EQ(qmp_server_close(&s), EOK);
+}
+
+/* QMP_OP_REFLECT: a tool reads the embedded reflection JSON in chunks; the chunks are
+ * replied straight from the blob, so its size is independent of the interface's
+ * max_msg_size (96 bytes here, against a document of several kilobytes). */
+TEST_F(E2E, ReflectionIsServedInChunks) {
+    qmp_client_t c;
+    connect(c);
+    const std::string want(reinterpret_cast<const char *>(demo_joint_v1_Joint_reflect_json),
+                           demo_joint_v1_Joint_reflect_json_len);
+    ASSERT_GT(want.size(), static_cast<size_t>(DEMO_JOINT_V1_JOINT_MAX_MSG_SIZE));
+    for (size_t cap : {size_t{1}, size_t{100}, size_t{QMP_REFLECT_CHUNK_MAX}, size_t{1} << 16}) {
+        std::string got;
+        std::vector<char> buf(cap);
+        uint32_t total = 0;
+        do {
+            uint32_t len = 0;
+            ASSERT_EQ(qmp_client_reflect(&c, static_cast<uint32_t>(got.size()), buf.data(),
+                                         buf.size(), &len, &total),
+                      EOK);
+            ASSERT_GT(len, 0u);
+            ASSERT_LE(len, QMP_REFLECT_CHUNK_MAX);
+            got.append(buf.data(), len);
+        } while (got.size() < total);
+        EXPECT_EQ(got, want) << "cap=" << cap;
+    }
+    /* Reading at or past the end is not an error: it reports the size and no bytes. */
+    char one = 0;
+    uint32_t len = 7;
+    uint32_t total = 0;
+    EXPECT_EQ(qmp_client_reflect(&c, static_cast<uint32_t>(want.size()), &one, 1, &len, &total),
+              EOK);
+    EXPECT_EQ(len, 0u);
+    EXPECT_EQ(total, want.size());
+    EXPECT_EQ(qmp_client_reflect(&c, UINT32_MAX, &one, 1, &len, &total), EOK);
+    EXPECT_EQ(len, 0u);
+    /* cap 0 is a pure size query. */
+    EXPECT_EQ(qmp_client_reflect(&c, 0, nullptr, 0, &len, &total), EOK);
+    EXPECT_EQ(len, 0u);
+    EXPECT_EQ(total, want.size());
+    qmp_client_close(&c);
+    EXPECT_EQ(qmp_client_reflect(&c, 0, &one, 1, &len, &total), ENOTCONN);
 }
 
 } // namespace

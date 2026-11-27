@@ -70,7 +70,7 @@ only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 | transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events); `uds` (`AF_UNIX`/`SOCK_SEQPACKET`, host default, also built on QNX) for benchmarks and host integration tests only — **no priority inheritance** (ADR-004) |
 | examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
 | tests | 86 GoogleTest cases (21 over UDS, including two-process kill -9 scenarios) + `joint_server --selftest` (host) + 55 codegen pytest cases, asan/ubsan/tsan clean |
-| on target | RPi5, build `fdf940c957a9` (2026-11-26): 65/65 GoogleTest cases, 18/18 `scripts/target-smoke.sh` scenarios; results recorded in [docs/VERIFY.md](docs/VERIFY.md) (7 confirmed, 5 partially) |
+| on target | RPi5, build `a4230da3880c` (2026-11-27): 86/86 GoogleTest cases (21 over UDS), 18/18 `scripts/target-smoke.sh` scenarios, joint demo over `--transport uds` and `qnx`; results recorded in [docs/VERIFY.md](docs/VERIFY.md). Same-board round trip, `loop 5000` with a 5 s timeout: native median 4.0 µs / p99 5.7 µs, UDS median 57.8 µs / p99 68.5 µs (a first look, not the W4 benchmark) |
 | next | qmpctl, C++ wrappers (W3); bench, secpol generation, uProtocol adapter (W4, adapter is stretch) |
 
 ## Build from a clean machine (Ubuntu 24.04, host build)

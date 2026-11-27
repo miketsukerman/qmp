@@ -236,8 +236,9 @@ bool parse_reflection(const std::string &text, Doc &out, std::string &err) {
         return fail(err, "not a JSON object");
     }
     uint32_t version = 0;
-    if (!get_u32(doc.raw, "qmp_reflect_version", version) || version != 1) {
-        return fail(err, "unsupported qmp_reflect_version (this qmpctl understands 1)");
+    if (!get_u32(doc.raw, "qmp_reflect_version", version) || version != kReflectVersion) {
+        return fail(err, "unsupported qmp_reflect_version (this qmpctl understands " +
+                             std::to_string(kReflectVersion) + ")");
     }
     auto jm = doc.raw.find("messages");
     auto js = doc.raw.find("services");

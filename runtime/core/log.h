@@ -44,7 +44,9 @@ static inline size_t qmp_log_prefix_(char *buf, size_t cap) {
                 qmp_log_off_ = sizeof(qmp_log_buf_) - 2U; /* truncated */                          \
             }                                                                                      \
             qmp_log_buf_[qmp_log_off_] = '\n';                                                     \
-            (void)write(STDERR_FILENO, qmp_log_buf_, qmp_log_off_ + 1U);                           \
+            /* Best effort; a (void) cast does not silence glibc's warn_unused_result. */          \
+            ssize_t qmp_log_w_ = write(STDERR_FILENO, qmp_log_buf_, qmp_log_off_ + 1U);            \
+            (void)qmp_log_w_;                                                                      \
         }                                                                                          \
     } while (0)
 #endif

@@ -18,12 +18,10 @@ add_library(qmpctl_lib STATIC
   codec.cpp
   discover.cpp
   qmpctl.cpp)
-target_include_directories(qmpctl_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
-                                      PRIVATE "${QMP_BUILD_ID_DIR}")
+target_include_directories(qmpctl_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 # SYSTEM: the project's -Werror set is for our code, not for a third-party header.
 target_include_directories(qmpctl_lib SYSTEM PUBLIC "${nlohmann_json_SOURCE_DIR}/include")
 target_link_libraries(qmpctl_lib PUBLIC qmp::qmp)
-add_dependencies(qmpctl_lib qmp_build_id)
 qmp_set_warnings(qmpctl_lib)
 if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
   target_compile_definitions(qmpctl_lib PUBLIC _QNX_SOURCE)

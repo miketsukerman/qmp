@@ -17,11 +17,8 @@ qmp_set_warnings(qmp_joint_client)
 target_compile_definitions(qmp_joint_server PRIVATE _POSIX_C_SOURCE=200809L)
 target_compile_definitions(qmp_joint_client PRIVATE _POSIX_C_SOURCE=200809L)
 
-# Both binaries print QMP_BUILD_ID at startup so the target run can be matched to a commit.
-foreach(_t qmp_joint_server qmp_joint_client)
-  add_dependencies(${_t} qmp_build_id)
-  target_include_directories(${_t} PRIVATE "${QMP_BUILD_ID_DIR}")
-endforeach()
+# Both binaries print qmp_build_version() and qmp_build_id() at startup so the target run can
+# be matched to a release and a commit.
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "QNX")
   if(QMP_BUILD_TESTS)

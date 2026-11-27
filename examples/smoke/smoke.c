@@ -399,6 +399,12 @@ int main(int argc, char **argv) {
     }
     const char *mode = argv[1];
     int rc;
+    /* One fputs: stderr is unbuffered, and a multi-part fprintf would interleave with the
+     * output of the other smoke processes in the scenario logs. */
+    char banner[128];
+    (void)snprintf(banner, sizeof(banner), "smoke: qmp %s build=%s wire=%u\n", qmp_build_version(),
+                   qmp_build_id(), (unsigned)qmp_wire_version());
+    (void)fputs(banner, stderr);
     if (strcmp(mode, "server") == 0) {
         rc = run_server();
     } else if (strcmp(mode, "echo") == 0) {

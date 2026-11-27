@@ -76,7 +76,13 @@ static int connect_once(qmp_client_impl_t *ci) {
     }
     qmp_hdr_t req_hdr;
     qmp_hdr_t rep_hdr;
-    qmp_hello_t hello = {ci->service_id, ci->instance_id, ci->ver_major, ci->ver_minor, {0, 0}};
+    qmp_hello_t hello;
+    memset(&hello, 0, sizeof(hello));
+    hello.service_id = ci->service_id;
+    hello.instance_id = ci->instance_id;
+    hello.ver_major = ci->ver_major;
+    hello.ver_minor = ci->ver_minor;
+    hello.wire_version = (uint8_t)QMP_WIRE_VERSION;
     qmp_hello_reply_t hr;
     qmp_hdr_init(&req_hdr, ci->service_id, ci->instance_id, QMP_OP_HELLO, ci->ver_major,
                  ci->ver_minor, QMP_F_CONTROL, (uint32_t)sizeof(hello));
@@ -88,11 +94,16 @@ static int connect_once(qmp_client_impl_t *ci) {
     if (rc == EOK) {
         rc = qmp_version_compatible(hr.ver_major, hr.ver_minor, ci->ver_major, ci->ver_minor);
     }
+    if (rc == EOK) {
+        rc = qmp_wire_version_compatible(hr.wire_version);
+    }
     if (rc != EOK) {
         (void)ci->tr->disconnect(&ci->conn);
         return rc;
     }
     ci->server_minor = hr.ver_minor;
+    ci->server_wire_version = hr.wire_version == 0 ? 1 : hr.wire_version;
+    ci->server_runtime_version = hr.runtime_version;
     ci->server_generation = hr.server_generation;
     ci->server_max_msg_size = hr.max_msg_size;
     ci->connected = 1;
@@ -552,4 +563,12 @@ uint32_t qmp_client_server_generation(const qmp_client_t *c) {
 
 uint8_t qmp_client_server_minor(const qmp_client_t *c) {
     return c != NULL ? cimpl(c)->server_minor : 0;
+}
+
+uint8_t qmp_client_server_wire_version(const qmp_client_t *c) {
+    return c != NULL ? cimpl(c)->server_wire_version : 0;
+}
+
+uint32_t qmp_client_server_runtime_version(const qmp_client_t *c) {
+    return c != NULL ? cimpl(c)->server_runtime_version : 0;
 }

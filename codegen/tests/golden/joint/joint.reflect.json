@@ -1,6 +1,6 @@
 {
   "qmp_reflect_version": 1,
-  "generator": "protoc-gen-qmp 0.1.0",
+  "generator": "protoc-gen-qmp 0.3.0",
   "up_spec": "v1.5.8",
   "source": "examples/demo/joint/v1/joint.proto",
   "package": "demo.joint.v1",

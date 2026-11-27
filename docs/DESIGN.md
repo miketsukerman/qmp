@@ -69,6 +69,9 @@ Layering inside one process, top to bottom. Each layer only calls the one below 
 
 Native byte order, 8-byte alignment, single node (no Qnet in 8.0). Header first, then payload.
 
+"v1" is `QMP_WIRE_VERSION` in `<qmp/qmp_version.h>`. It is separate from the product version
+and changes only when two builds could no longer talk (ADR-011).
+
 ```c
 #define QMP_MSG_TYPE   ((uint16_t)(_IO_MAX + 0x100))   /* 0x2FF; > _IO_MAX as required */
 
@@ -103,7 +106,7 @@ Control opcodes (`QMP_F_CONTROL` set; `resource_id` field):
 
 | op | value | request payload | reply payload |
 |----|-------|-----------------|---------------|
-| `QMP_OP_HELLO` | 1 | `qmp_hello_t {u16 service_id; u16 instance_id; u8 ver_major; u8 ver_minor; u8 pad[2];}` | `qmp_hello_reply_t {u8 ver_major; u8 ver_minor; u8 pad[2]; u32 server_generation; u32 max_msg_size; u32 pad2;}` — or `MsgError(ENOTSUP)` on major mismatch |
+| `QMP_OP_HELLO` | 1 | `qmp_hello_t {u16 service_id; u16 instance_id; u8 ver_major; u8 ver_minor; u8 wire_version; u8 pad;}` — `wire_version` is the client's `QMP_WIRE_VERSION`; 0 means a pre-0.3.0 peer and is read as 1 (ADR-011) | `qmp_hello_reply_t {u8 ver_major; u8 ver_minor; u8 wire_version; u8 pad; u32 server_generation; u32 max_msg_size; u32 runtime_version;}` — `runtime_version` is the server's `QMP_VERSION_HEX`, 0 = unknown — or `MsgError(ENOTSUP)` on a service-major or wire-version mismatch |
 | `QMP_OP_SUBSCRIBE` | 2 | `qmp_subscribe_t {u16 topic_id; u16 event_len; u8 pad[4]; u8 event[64];}` — `event` is the client's **registered** `struct sigevent`, rewritten in place by `MsgRegisterEvent` (V-QNX-042); opaque to the core | `qmp_subscribe_reply_t {u32 sub_id; u16 mode; u16 depth; u64 seq;}` — `seq` is the newest published sequence (0 = none yet); only *newer* updates are delivered |
 | `QMP_OP_UNSUBSCRIBE` | 3 | `qmp_unsubscribe_t {u32 sub_id; u8 pad[4];}` | empty |
 | `QMP_OP_PULL` | 4 | `qmp_pull_t {u16 topic_id; u8 pad[6]; u64 after_seq;}` — `after_seq` is the newest sequence the client has consumed; the source of truth (pulses are advisory, V-QNX-044) | `qmp_pull_reply_t {u64 seq; u64 dropped; u32 remaining; u32 count;}` + `count` (0 or 1 in v1) sample structs; `dropped` counts overwritten/overflowed updates, never hidden; `remaining > 0` ⇒ pull again |

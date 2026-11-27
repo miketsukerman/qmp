@@ -44,7 +44,6 @@
 #include <unistd.h>
 
 #include "joint.qmp.h"
-#include "qmp_build_id.h"
 
 #define MAX_BURN_MS  600000 /* cap Burn at 10 minutes                                   */
 #define BURN_POLL_MS 50     /* how often a running Burn polls qmp_req_canceled()        */
@@ -76,7 +75,9 @@ static void log_event(const char *fmt, ...) {
         off += (size_t)m < sizeof(buf) - off ? (size_t)m : sizeof(buf) - 1 - off;
     }
     buf[off++] = '\n';
-    (void)write(STDERR_FILENO, buf, off);
+    /* Best effort; a (void) cast does not silence glibc's warn_unused_result. */
+    ssize_t written = write(STDERR_FILENO, buf, off);
+    (void)written;
 }
 #define LOGF log_event
 
@@ -420,9 +421,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    LOGF("started pid=%d build=%s service=%s path=%s transport=%s threads=%d fixed_priority=%d "
+    LOGF("started pid=%d version=%s build=%s service=%s path=%s transport=%s threads=%d "
+         "fixed_priority=%d "
          "publish_ms=%ld generation=%" PRIu32,
-         (int)getpid(), QMP_BUILD_ID, DEMO_JOINT_V1_JOINT_SERVICE_NAME,
+         (int)getpid(), qmp_build_version(), qmp_build_id(), DEMO_JOINT_V1_JOINT_SERVICE_NAME,
          DEMO_JOINT_V1_JOINT_QNX_PATH, tr->name, nthreads, fixed_priority, publish_ms,
          qmp_server_generation(&server));
 

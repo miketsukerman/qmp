@@ -1,6 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.20)
-project(qmp VERSION 0.1.0 LANGUAGES C CXX)
+
+# The version is defined once, in include/qmp/qmp_version.h (ADR-011).
+set(QMP_VERSION_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/qmp/qmp_version.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${QMP_VERSION_HEADER}")
+foreach(_part MAJOR MINOR PATCH)
+  file(STRINGS "${QMP_VERSION_HEADER}" _line REGEX "^#define QMP_VERSION_${_part} [0-9]+$")
+  if(NOT _line MATCHES "^#define QMP_VERSION_${_part} ([0-9]+)$")
+    message(FATAL_ERROR "QMP_VERSION_${_part} not found in ${QMP_VERSION_HEADER}")
+  endif()
+  set(_qmp_version_${_part} "${CMAKE_MATCH_1}")
+endforeach()
+
+project(qmp VERSION ${_qmp_version_MAJOR}.${_qmp_version_MINOR}.${_qmp_version_PATCH}
+        LANGUAGES C CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -33,12 +46,14 @@ option(QMP_TRANSPORT_UDS "Build the UDS bench-only transport (no priority inheri
 include(QmpWarnings)
 include(QmpCodegen)
 
-# Build identifier (git hash + dirty flag) regenerated on every build; the script only
-# rewrites the header when the id changes, so dependents rebuild exactly then.
+# Build identifier (git hash + dirty flag) and build version (release version plus the
+# distance from its tag) regenerated on every build; the script only rewrites the header
+# when either changes, so dependents rebuild exactly then.
 set(QMP_BUILD_ID_DIR "${CMAKE_BINARY_DIR}/gen/buildid")
 set(QMP_BUILD_ID_HEADER "${QMP_BUILD_ID_DIR}/qmp_build_id.h")
 add_custom_target(qmp_build_id
   COMMAND ${CMAKE_COMMAND} -DOUT=${QMP_BUILD_ID_HEADER} -DSRC=${PROJECT_SOURCE_DIR}
+          -DVERSION=${PROJECT_VERSION}
           -P ${PROJECT_SOURCE_DIR}/cmake/QmpBuildId.cmake
   BYPRODUCTS ${QMP_BUILD_ID_HEADER}
   COMMENT "Refreshing qmp_build_id.h")

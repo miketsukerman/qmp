@@ -80,8 +80,18 @@ static void handle_control(qmp_server_impl_t *s, const qmp_rcv_info_t *info, con
             send_error(s, info->rcvid, ENOTSUP);
             return;
         }
-        qmp_hello_reply_t hr = {s->desc->ver_major, s->desc->ver_minor, {0, 0},
-                                s->generation,      s->max_msg_size,    0};
+        if (qmp_wire_version_compatible(hello.wire_version) != EOK) {
+            send_error(s, info->rcvid, ENOTSUP);
+            return;
+        }
+        qmp_hello_reply_t hr;
+        memset(&hr, 0, sizeof(hr));
+        hr.ver_major = s->desc->ver_major;
+        hr.ver_minor = s->desc->ver_minor;
+        hr.wire_version = (uint8_t)QMP_WIRE_VERSION;
+        hr.server_generation = s->generation;
+        hr.max_msg_size = s->max_msg_size;
+        hr.runtime_version = (uint32_t)QMP_VERSION_HEX;
         qmp_hdr_init_reply(rh, h, 0, (uint32_t)sizeof(hr));
         memcpy(rep + QMP_HDR_SIZE, &hr, sizeof(hr));
         send_reply(s, info->rcvid, rh, rep + QMP_HDR_SIZE, sizeof(hr));

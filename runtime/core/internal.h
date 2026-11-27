@@ -45,13 +45,14 @@ typedef struct qmp_client_impl {
     uint8_t connected;
     uint32_t server_generation;
     uint32_t server_max_msg_size;
-    uint8_t have_params; /* connect() ran once: reconnect() may reuse the identity */
-    uint8_t notify_open; /* private notification channel exists                    */
-    uint8_t _pad0[2];
+    uint8_t have_params;         /* connect() ran once: reconnect() may reuse the identity */
+    uint8_t notify_open;         /* private notification channel exists                    */
+    uint8_t server_wire_version; /* from HELLO; 1 for a pre-0.3.0 server           */
+    uint8_t _pad0;
     uint32_t reconnect_initial_ms;
     uint32_t reconnect_max_ms;
     uint32_t reconnect_attempts;
-    uint32_t _pad1;
+    uint32_t server_runtime_version; /* server's QMP_VERSION_HEX from HELLO; 0 = unknown */
     qmp_sub_impl_t *subs[QMP_CLIENT_MAX_SUBS]; /* caller-provided qmp_sub_t storage */
 } qmp_client_impl_t;
 QMP_STATIC_ASSERT(sizeof(qmp_client_impl_t) <= sizeof(qmp_client_t), "qmp_client_t too small");

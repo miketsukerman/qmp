@@ -445,23 +445,21 @@ int cmd_list(const Options &opt, Io &io) {
         wpath = std::max(wpath, r.path.size());
         wsvc = std::max(wsvc, r.service.size());
     }
-    io.out << std::left << std::setw(static_cast<int>(wpath)) << "NAME"
-           << "  " << std::setw(static_cast<int>(wsvc)) << "SERVICE"
-           << "  " << std::setw(7) << "VERSION"
-           << "  " << std::setw(7) << "METHODS"
-           << "  " << std::setw(6) << "TOPICS"
-           << "  UURI\n";
+    // Left-justified cell followed by the two-space column gap.
+    auto cell = [](const std::string &text, size_t width) {
+        return text + std::string(width > text.size() ? width - text.size() : 0, ' ') + "  ";
+    };
+    io.out << cell("NAME", wpath) << cell("SERVICE", wsvc) << cell("VERSION", 7)
+           << cell("METHODS", 7) << cell("TOPICS", 6) << "UURI\n";
     for (const Row &r : rows) {
-        io.out << std::left << std::setw(static_cast<int>(wpath)) << r.path << "  ";
+        io.out << cell(r.path, wpath);
         if (!r.note.empty()) {
-            io.out << std::setw(static_cast<int>(wsvc)) << "-"
-                   << "  " << std::setw(7) << (r.version.empty() ? "-" : r.version) << "  ("
-                   << r.note << ")\n";
+            io.out << cell("-", wsvc) << cell(r.version.empty() ? "-" : r.version, 7);
+            io.out << "(" << r.note << ")\n";
             continue;
         }
-        io.out << std::setw(static_cast<int>(wsvc)) << r.service << "  " << std::setw(7)
-               << r.version << "  " << std::setw(7) << r.methods << "  " << std::setw(6) << r.topics
-               << "  " << r.uuri << "\n";
+        io.out << cell(r.service, wsvc) << cell(r.version, 7) << cell(r.methods, 7)
+               << cell(r.topics, 6) << r.uuri << "\n";
     }
     return kExitOk;
 }
@@ -835,7 +833,7 @@ int cmd_call(const Options &opt, Io &io) {
 // ---- subscribe ----------------------------------------------------------------------------
 
 uint64_t realtime_ns() {
-    struct timespec ts{};
+    timespec ts = {};
     (void)clock_gettime(CLOCK_REALTIME, &ts);
     return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
 }

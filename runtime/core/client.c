@@ -495,6 +495,53 @@ int qmp_client_close(qmp_client_t *c) {
     return rc;
 }
 
+int qmp_client_reflect(qmp_client_t *c, uint32_t offset, void *buf, size_t cap, uint32_t *len,
+                       uint32_t *total_len) {
+    qmp_client_impl_t *ci = (qmp_client_impl_t *)(void *)c;
+    if (c == NULL || len == NULL || total_len == NULL || (buf == NULL && cap > 0)) {
+        return EINVAL;
+    }
+    *len = 0;
+    *total_len = 0;
+    if (!ci->connected) {
+        return ENOTCONN;
+    }
+    if (cap > QMP_REFLECT_CHUNK_MAX) {
+        cap = QMP_REFLECT_CHUNK_MAX;
+    }
+    qmp_reflect_t rq = {offset, (uint32_t)cap};
+    qmp_reflect_reply_t rr = {0, 0};
+    qmp_hdr_t req_hdr;
+    qmp_hdr_t rep_hdr;
+    qmp_hdr_init(&req_hdr, ci->service_id, ci->instance_id, QMP_OP_REFLECT, ci->ver_major,
+                 ci->ver_minor, QMP_F_CONTROL, (uint32_t)sizeof(rq));
+    memset(&rep_hdr, 0, sizeof(rep_hdr));
+    qmp_iov_t siov[2] = {{&req_hdr, QMP_HDR_SIZE}, {&rq, sizeof(rq)}};
+    qmp_iov_t riov[3] = {{&rep_hdr, QMP_HDR_SIZE}, {&rr, sizeof(rr)}, {buf, cap}};
+    size_t reply_len = 0;
+    int rc =
+        ci->tr->call(&ci->conn, siov, 2, riov, cap > 0 ? 3 : 2, ci->default_timeout_ns, &reply_len);
+    if (rc != EOK) {
+        return mark_dead_on(rc, ci);
+    }
+    if (reply_len == 0) {
+        reply_len = QMP_HDR_SIZE + (size_t)rep_hdr.payload_len;
+    }
+    rc = qmp_hdr_validate_reply(&rep_hdr, &req_hdr, reply_len, sizeof(rr) + cap);
+    if (rc != EOK) {
+        return rc;
+    }
+    /* Untrusted reply: the chunk must fit what was asked for and stay inside the document. */
+    if (rep_hdr.status != 0 || rep_hdr.payload_len < sizeof(rr) ||
+        rep_hdr.payload_len != sizeof(rr) + (size_t)rr.len || rr.len > cap ||
+        rr.len > (offset < rr.total_len ? rr.total_len - offset : 0U)) {
+        return EPROTO;
+    }
+    *len = rr.len;
+    *total_len = rr.total_len;
+    return EOK;
+}
+
 int qmp_client_is_connected(const qmp_client_t *c) {
     return c != NULL && cimpl(c)->connected;
 }

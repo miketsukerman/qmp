@@ -105,6 +105,10 @@ typedef struct qmp_service_desc {
     size_t nmethods;
     const qmp_topic_desc_t *topics; /* sorted by id; NULL when ntopics == 0 */
     size_t ntopics;
+    /* Reflection JSON served to tools through QMP_OP_REFLECT (generated code points this
+     * at the embedded <svc>.reflect.json). NULL/0 = none: REFLECT answers ENOSYS. */
+    const unsigned char *reflect_json;
+    size_t reflect_json_len;
 } qmp_service_desc_t;
 
 typedef struct qmp_server_cfg {

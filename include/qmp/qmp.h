@@ -59,6 +59,7 @@ enum qmp_control_op {
     QMP_OP_SUBSCRIBE = 2,
     QMP_OP_UNSUBSCRIBE = 3,
     QMP_OP_PULL = 4,
+    QMP_OP_REFLECT = 5, /* read the service's reflection JSON (tools; never hot path) */
 };
 
 /* ---- wire header (DESIGN §2) -------------------------------------------- */
@@ -163,6 +164,26 @@ typedef struct qmp_pull_reply {
     uint32_t count;     /* samples following this struct                        */
 } qmp_pull_reply_t;
 QMP_STATIC_ASSERT(sizeof(qmp_pull_reply_t) == 24, "layout");
+
+/* ---- reflection (DESIGN §3.9) --------------------------------------------- */
+/* REFLECT returns a window of the reflection JSON that protoc-gen-qmp embedded in the
+ * service (the same bytes as <svc>.reflect.json). Tools such as qmpctl read it in chunks
+ * and need no generated code. A server without a blob (hand-written descriptor, or a
+ * runtime older than this opcode) answers ENOSYS. */
+#define QMP_REFLECT_CHUNK_MAX 4096U
+
+typedef struct qmp_reflect {
+    uint32_t offset;  /* first byte wanted                                    */
+    uint32_t max_len; /* reply capacity; the server also clamps to CHUNK_MAX  */
+} qmp_reflect_t;
+QMP_STATIC_ASSERT(sizeof(qmp_reflect_t) == 8, "layout");
+
+/* Reply: this struct, then `len` bytes of JSON (not NUL-terminated). */
+typedef struct qmp_reflect_reply {
+    uint32_t total_len; /* size of the whole document                         */
+    uint32_t len;       /* bytes following; 0 when offset >= total_len        */
+} qmp_reflect_reply_t;
+QMP_STATIC_ASSERT(sizeof(qmp_reflect_reply_t) == 8, "layout");
 
 /* ---- handler return values ---------------------------------------------- */
 #define QMP_HANDLED  0    /* reply now with *out and *status                  */

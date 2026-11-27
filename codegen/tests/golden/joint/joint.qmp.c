@@ -4,245 +4,8 @@
 
 #include <stddef.h>
 
-/* ---- service demo.joint.v1.Joint ----------------------------------------- */
-
-/* ---- payload validators (bounds of untrusted data) --------------------- */
-int demo_joint_v1_JointState_validate(const void *payload) {
-    const demo_joint_v1_JointState *m = (const demo_joint_v1_JointState *)payload;
-    if (m->mode.len > 16U) {
-        return ERANGE;
-    }
-    return EOK;
-}
-
-/* ---- trampolines: untyped runtime call -> typed ops table -------------- */
-static int demo_joint_v1_Joint_tr_SetTarget(const void *ops_, void *ctx, qmp_req_t *req,
-    const void *in, void *out, int32_t *status) {
-    const demo_joint_v1_Joint_ops *ops = (const demo_joint_v1_Joint_ops *)ops_;
-    if (ops->SetTarget == NULL) {
-        return ENOSYS;
-    }
-    return ops->SetTarget(ctx,
-        req,
-        (const demo_joint_v1_SetTargetRequest *)in,
-        (demo_joint_v1_SetTargetReply *)out,
-        status);
-}
-
-static int demo_joint_v1_Joint_tr_GetState(const void *ops_, void *ctx, qmp_req_t *req,
-    const void *in, void *out, int32_t *status) {
-    const demo_joint_v1_Joint_ops *ops = (const demo_joint_v1_Joint_ops *)ops_;
-    (void)in;
-    if (ops->GetState == NULL) {
-        return ENOSYS;
-    }
-    return ops->GetState(ctx, req, (demo_joint_v1_JointState *)out, status);
-}
-
-static int demo_joint_v1_Joint_tr_Burn(const void *ops_, void *ctx, qmp_req_t *req,
-    const void *in, void *out, int32_t *status) {
-    const demo_joint_v1_Joint_ops *ops = (const demo_joint_v1_Joint_ops *)ops_;
-    if (ops->Burn == NULL) {
-        return ENOSYS;
-    }
-    return ops->Burn(ctx,
-        req,
-        (const demo_joint_v1_BurnRequest *)in,
-        (demo_joint_v1_BurnReply *)out,
-        status);
-}
-
-static const qmp_method_desc_t demo_joint_v1_Joint_methods[] = {
-    {
-        DEMO_JOINT_V1_JOINT_M_SETTARGET,
-        0U,
-        (uint32_t)sizeof(demo_joint_v1_SetTargetRequest),
-        (uint32_t)sizeof(demo_joint_v1_SetTargetReply),
-        0U,
-        NULL,
-        demo_joint_v1_Joint_tr_SetTarget,
-        "SetTarget",
-    },
-    {
-        DEMO_JOINT_V1_JOINT_M_STOP,
-        QMP_MF_ONEWAY,
-        0U,
-        0U,
-        0U,
-        NULL,
-        NULL /* one-way: W3 */,
-        "Stop",
-    },
-    {
-        DEMO_JOINT_V1_JOINT_M_GETSTATE,
-        0U,
-        0U,
-        (uint32_t)sizeof(demo_joint_v1_JointState),
-        0U,
-        NULL,
-        demo_joint_v1_Joint_tr_GetState,
-        "GetState",
-    },
-    {
-        DEMO_JOINT_V1_JOINT_M_BURN,
-        0U,
-        (uint32_t)sizeof(demo_joint_v1_BurnRequest),
-        (uint32_t)sizeof(demo_joint_v1_BurnReply),
-        0U,
-        NULL,
-        demo_joint_v1_Joint_tr_Burn,
-        "Burn",
-    },
-};
-
-static const qmp_topic_desc_t demo_joint_v1_Joint_topics[] = {
-    {
-        DEMO_JOINT_V1_JOINT_T_STATECHANGED,
-        QMP_TOPIC_LATEST,
-        0U,
-        0U,
-        (uint32_t)sizeof(demo_joint_v1_JointState),
-        0U,
-        "StateChanged",
-    },
-    {
-        DEMO_JOINT_V1_JOINT_T_STATELOG,
-        QMP_TOPIC_QUEUE,
-        8U,
-        0U,
-        (uint32_t)sizeof(demo_joint_v1_JointState),
-        0U,
-        "StateLog",
-    },
-};
-
-const qmp_service_desc_t demo_joint_v1_Joint_desc = {
-    DEMO_JOINT_V1_JOINT_SERVICE_ID,
-    DEMO_JOINT_V1_JOINT_VER_MAJOR,
-    DEMO_JOINT_V1_JOINT_VER_MINOR,
-    DEMO_JOINT_V1_JOINT_MAX_MSG_SIZE,
-    DEMO_JOINT_V1_JOINT_SERVICE_NAME,
-    demo_joint_v1_Joint_methods,
-    sizeof(demo_joint_v1_Joint_methods) / sizeof(demo_joint_v1_Joint_methods[0]),
-    demo_joint_v1_Joint_topics,
-    sizeof(demo_joint_v1_Joint_topics) / sizeof(demo_joint_v1_Joint_topics[0]),
-};
-
-int demo_joint_v1_Joint_register(qmp_server_t *s, uint16_t instance_id,
-    const demo_joint_v1_Joint_ops *ops, void *ctx) {
-    return qmp_server_register(s, &demo_joint_v1_Joint_desc, instance_id, ops, ctx);
-}
-
-int demo_joint_v1_Joint_publish_StateChanged(qmp_server_t *s, const demo_joint_v1_JointState *sample) {
-    return qmp_server_publish(s, DEMO_JOINT_V1_JOINT_T_STATECHANGED, sample, sizeof(*sample));
-}
-
-int demo_joint_v1_Joint_publish_StateLog(qmp_server_t *s, const demo_joint_v1_JointState *sample) {
-    return qmp_server_publish(s, DEMO_JOINT_V1_JOINT_T_STATELOG, sample, sizeof(*sample));
-}
-
-/* ---- client stubs ------------------------------------------------------ */
-int demo_joint_v1_Joint_connect(qmp_client_t *c, uint16_t instance_id,
-    const qmp_client_cfg_t *cfg) {
-    int rc = qmp_client_init(c, cfg);
-    if (rc != EOK) {
-        return rc;
-    }
-    return qmp_client_connect(c, DEMO_JOINT_V1_JOINT_SERVICE_ID, instance_id,
-                              DEMO_JOINT_V1_JOINT_VER_MAJOR, DEMO_JOINT_V1_JOINT_VER_MINOR);
-}
-
-int demo_joint_v1_Joint_SetTarget_ex(qmp_client_t *c,
-    const demo_joint_v1_SetTargetRequest *req,
-    demo_joint_v1_SetTargetReply *rep,
-    int32_t *status,
-    const qmp_call_opts_t *opts) {
-    return qmp_client_call(c, DEMO_JOINT_V1_JOINT_M_SETTARGET, req, sizeof(*req), rep, sizeof(*rep),
-                           status, opts);
-}
-
-int demo_joint_v1_Joint_SetTarget(qmp_client_t *c,
-    const demo_joint_v1_SetTargetRequest *req,
-    demo_joint_v1_SetTargetReply *rep,
-    int32_t *status) {
-    return demo_joint_v1_Joint_SetTarget_ex(c, req, rep, status, NULL);
-}
-
-int demo_joint_v1_Joint_GetState_ex(qmp_client_t *c, demo_joint_v1_JointState *rep, int32_t *status,
-    const qmp_call_opts_t *opts) {
-    return qmp_client_call(c, DEMO_JOINT_V1_JOINT_M_GETSTATE, NULL, 0, rep, sizeof(*rep),
-                           status, opts);
-}
-
-int demo_joint_v1_Joint_GetState(qmp_client_t *c, demo_joint_v1_JointState *rep, int32_t *status) {
-    return demo_joint_v1_Joint_GetState_ex(c, rep, status, NULL);
-}
-
-int demo_joint_v1_Joint_Burn_ex(qmp_client_t *c,
-    const demo_joint_v1_BurnRequest *req,
-    demo_joint_v1_BurnReply *rep,
-    int32_t *status,
-    const qmp_call_opts_t *opts) {
-    return qmp_client_call(c, DEMO_JOINT_V1_JOINT_M_BURN, req, sizeof(*req), rep, sizeof(*rep),
-                           status, opts);
-}
-
-int demo_joint_v1_Joint_Burn(qmp_client_t *c,
-    const demo_joint_v1_BurnRequest *req,
-    demo_joint_v1_BurnReply *rep,
-    int32_t *status) {
-    return demo_joint_v1_Joint_Burn_ex(c, req, rep, status, NULL);
-}
-
-/* qmp_sub_cb_t -> typed StateChanged callback; runs on the qmp_client_poll() thread. */
-static void demo_joint_v1_Joint_tr_topic_StateChanged(void *ctx, const void *sample, uint32_t len,
-    uint64_t seq, uint64_t dropped) {
-    demo_joint_v1_Joint_StateChanged_sub_t *s = (demo_joint_v1_Joint_StateChanged_sub_t *)ctx;
-    if (len != sizeof(demo_joint_v1_JointState) || s->cb == NULL) {
-        return; /* size mismatch: drop rather than hand out a short sample */
-    }
-    s->cb(s->ctx, (const demo_joint_v1_JointState *)sample, seq, dropped);
-}
-
-int demo_joint_v1_Joint_subscribe_StateChanged(qmp_client_t *c,
-    demo_joint_v1_Joint_StateChanged_sub_t *sub, demo_joint_v1_Joint_StateChanged_cb cb, void *ctx) {
-    sub->cb = cb;
-    sub->ctx = ctx;
-    return qmp_client_subscribe(c, DEMO_JOINT_V1_JOINT_T_STATECHANGED, &sub->sample,
-                                sizeof(sub->sample), demo_joint_v1_Joint_tr_topic_StateChanged,
-                                sub, &sub->sub);
-}
-
-int demo_joint_v1_Joint_unsubscribe_StateChanged(qmp_client_t *c,
-    demo_joint_v1_Joint_StateChanged_sub_t *sub) {
-    return qmp_client_unsubscribe(c, &sub->sub);
-}
-
-/* qmp_sub_cb_t -> typed StateLog callback; runs on the qmp_client_poll() thread. */
-static void demo_joint_v1_Joint_tr_topic_StateLog(void *ctx, const void *sample, uint32_t len,
-    uint64_t seq, uint64_t dropped) {
-    demo_joint_v1_Joint_StateLog_sub_t *s = (demo_joint_v1_Joint_StateLog_sub_t *)ctx;
-    if (len != sizeof(demo_joint_v1_JointState) || s->cb == NULL) {
-        return; /* size mismatch: drop rather than hand out a short sample */
-    }
-    s->cb(s->ctx, (const demo_joint_v1_JointState *)sample, seq, dropped);
-}
-
-int demo_joint_v1_Joint_subscribe_StateLog(qmp_client_t *c,
-    demo_joint_v1_Joint_StateLog_sub_t *sub, demo_joint_v1_Joint_StateLog_cb cb, void *ctx) {
-    sub->cb = cb;
-    sub->ctx = ctx;
-    return qmp_client_subscribe(c, DEMO_JOINT_V1_JOINT_T_STATELOG, &sub->sample,
-                                sizeof(sub->sample), demo_joint_v1_Joint_tr_topic_StateLog,
-                                sub, &sub->sub);
-}
-
-int demo_joint_v1_Joint_unsubscribe_StateLog(qmp_client_t *c,
-    demo_joint_v1_Joint_StateLog_sub_t *sub) {
-    return qmp_client_unsubscribe(c, &sub->sub);
-}
-
 /* ---- reflection blob (UTF-8 JSON, NUL-terminated) ----------------------- */
+/* Served to tools by the runtime (QMP_OP_REFLECT) through the service descriptor. */
 static const unsigned char qmp_reflect_blob_[] = {
     0x7b, 0x0a, 0x20, 0x20, 0x22, 0x71, 0x6d, 0x70, 0x5f, 0x72, 0x65, 0x66, 0x6c, 0x65, 0x63, 0x74,
     0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x22, 0x3a, 0x20, 0x31, 0x2c, 0x0a, 0x20, 0x20,
@@ -613,5 +376,247 @@ static const unsigned char qmp_reflect_blob_[] = {
     0x20, 0x20, 0x7d, 0x0a, 0x20, 0x20, 0x7d, 0x0a, 0x7d, 0x0a,
     0x00,
 };
+
+/* ---- service demo.joint.v1.Joint ----------------------------------------- */
+
+/* ---- payload validators (bounds of untrusted data) --------------------- */
+int demo_joint_v1_JointState_validate(const void *payload) {
+    const demo_joint_v1_JointState *m = (const demo_joint_v1_JointState *)payload;
+    if (m->mode.len > 16U) {
+        return ERANGE;
+    }
+    return EOK;
+}
+
+/* ---- trampolines: untyped runtime call -> typed ops table -------------- */
+static int demo_joint_v1_Joint_tr_SetTarget(const void *ops_, void *ctx, qmp_req_t *req,
+    const void *in, void *out, int32_t *status) {
+    const demo_joint_v1_Joint_ops *ops = (const demo_joint_v1_Joint_ops *)ops_;
+    if (ops->SetTarget == NULL) {
+        return ENOSYS;
+    }
+    return ops->SetTarget(ctx,
+        req,
+        (const demo_joint_v1_SetTargetRequest *)in,
+        (demo_joint_v1_SetTargetReply *)out,
+        status);
+}
+
+static int demo_joint_v1_Joint_tr_GetState(const void *ops_, void *ctx, qmp_req_t *req,
+    const void *in, void *out, int32_t *status) {
+    const demo_joint_v1_Joint_ops *ops = (const demo_joint_v1_Joint_ops *)ops_;
+    (void)in;
+    if (ops->GetState == NULL) {
+        return ENOSYS;
+    }
+    return ops->GetState(ctx, req, (demo_joint_v1_JointState *)out, status);
+}
+
+static int demo_joint_v1_Joint_tr_Burn(const void *ops_, void *ctx, qmp_req_t *req,
+    const void *in, void *out, int32_t *status) {
+    const demo_joint_v1_Joint_ops *ops = (const demo_joint_v1_Joint_ops *)ops_;
+    if (ops->Burn == NULL) {
+        return ENOSYS;
+    }
+    return ops->Burn(ctx,
+        req,
+        (const demo_joint_v1_BurnRequest *)in,
+        (demo_joint_v1_BurnReply *)out,
+        status);
+}
+
+static const qmp_method_desc_t demo_joint_v1_Joint_methods[] = {
+    {
+        DEMO_JOINT_V1_JOINT_M_SETTARGET,
+        0U,
+        (uint32_t)sizeof(demo_joint_v1_SetTargetRequest),
+        (uint32_t)sizeof(demo_joint_v1_SetTargetReply),
+        0U,
+        NULL,
+        demo_joint_v1_Joint_tr_SetTarget,
+        "SetTarget",
+    },
+    {
+        DEMO_JOINT_V1_JOINT_M_STOP,
+        QMP_MF_ONEWAY,
+        0U,
+        0U,
+        0U,
+        NULL,
+        NULL /* one-way: W3 */,
+        "Stop",
+    },
+    {
+        DEMO_JOINT_V1_JOINT_M_GETSTATE,
+        0U,
+        0U,
+        (uint32_t)sizeof(demo_joint_v1_JointState),
+        0U,
+        NULL,
+        demo_joint_v1_Joint_tr_GetState,
+        "GetState",
+    },
+    {
+        DEMO_JOINT_V1_JOINT_M_BURN,
+        0U,
+        (uint32_t)sizeof(demo_joint_v1_BurnRequest),
+        (uint32_t)sizeof(demo_joint_v1_BurnReply),
+        0U,
+        NULL,
+        demo_joint_v1_Joint_tr_Burn,
+        "Burn",
+    },
+};
+
+static const qmp_topic_desc_t demo_joint_v1_Joint_topics[] = {
+    {
+        DEMO_JOINT_V1_JOINT_T_STATECHANGED,
+        QMP_TOPIC_LATEST,
+        0U,
+        0U,
+        (uint32_t)sizeof(demo_joint_v1_JointState),
+        0U,
+        "StateChanged",
+    },
+    {
+        DEMO_JOINT_V1_JOINT_T_STATELOG,
+        QMP_TOPIC_QUEUE,
+        8U,
+        0U,
+        (uint32_t)sizeof(demo_joint_v1_JointState),
+        0U,
+        "StateLog",
+    },
+};
+
+const qmp_service_desc_t demo_joint_v1_Joint_desc = {
+    DEMO_JOINT_V1_JOINT_SERVICE_ID,
+    DEMO_JOINT_V1_JOINT_VER_MAJOR,
+    DEMO_JOINT_V1_JOINT_VER_MINOR,
+    DEMO_JOINT_V1_JOINT_MAX_MSG_SIZE,
+    DEMO_JOINT_V1_JOINT_SERVICE_NAME,
+    demo_joint_v1_Joint_methods,
+    sizeof(demo_joint_v1_Joint_methods) / sizeof(demo_joint_v1_Joint_methods[0]),
+    demo_joint_v1_Joint_topics,
+    sizeof(demo_joint_v1_Joint_topics) / sizeof(demo_joint_v1_Joint_topics[0]),
+    qmp_reflect_blob_,
+    5866U,
+};
+
 const unsigned char *const demo_joint_v1_Joint_reflect_json = qmp_reflect_blob_;
 const size_t demo_joint_v1_Joint_reflect_json_len = 5866U;
+
+int demo_joint_v1_Joint_register(qmp_server_t *s, uint16_t instance_id,
+    const demo_joint_v1_Joint_ops *ops, void *ctx) {
+    return qmp_server_register(s, &demo_joint_v1_Joint_desc, instance_id, ops, ctx);
+}
+
+int demo_joint_v1_Joint_publish_StateChanged(qmp_server_t *s, const demo_joint_v1_JointState *sample) {
+    return qmp_server_publish(s, DEMO_JOINT_V1_JOINT_T_STATECHANGED, sample, sizeof(*sample));
+}
+
+int demo_joint_v1_Joint_publish_StateLog(qmp_server_t *s, const demo_joint_v1_JointState *sample) {
+    return qmp_server_publish(s, DEMO_JOINT_V1_JOINT_T_STATELOG, sample, sizeof(*sample));
+}
+
+/* ---- client stubs ------------------------------------------------------ */
+int demo_joint_v1_Joint_connect(qmp_client_t *c, uint16_t instance_id,
+    const qmp_client_cfg_t *cfg) {
+    int rc = qmp_client_init(c, cfg);
+    if (rc != EOK) {
+        return rc;
+    }
+    return qmp_client_connect(c, DEMO_JOINT_V1_JOINT_SERVICE_ID, instance_id,
+                              DEMO_JOINT_V1_JOINT_VER_MAJOR, DEMO_JOINT_V1_JOINT_VER_MINOR);
+}
+
+int demo_joint_v1_Joint_SetTarget_ex(qmp_client_t *c,
+    const demo_joint_v1_SetTargetRequest *req,
+    demo_joint_v1_SetTargetReply *rep,
+    int32_t *status,
+    const qmp_call_opts_t *opts) {
+    return qmp_client_call(c, DEMO_JOINT_V1_JOINT_M_SETTARGET, req, sizeof(*req), rep, sizeof(*rep),
+                           status, opts);
+}
+
+int demo_joint_v1_Joint_SetTarget(qmp_client_t *c,
+    const demo_joint_v1_SetTargetRequest *req,
+    demo_joint_v1_SetTargetReply *rep,
+    int32_t *status) {
+    return demo_joint_v1_Joint_SetTarget_ex(c, req, rep, status, NULL);
+}
+
+int demo_joint_v1_Joint_GetState_ex(qmp_client_t *c, demo_joint_v1_JointState *rep, int32_t *status,
+    const qmp_call_opts_t *opts) {
+    return qmp_client_call(c, DEMO_JOINT_V1_JOINT_M_GETSTATE, NULL, 0, rep, sizeof(*rep),
+                           status, opts);
+}
+
+int demo_joint_v1_Joint_GetState(qmp_client_t *c, demo_joint_v1_JointState *rep, int32_t *status) {
+    return demo_joint_v1_Joint_GetState_ex(c, rep, status, NULL);
+}
+
+int demo_joint_v1_Joint_Burn_ex(qmp_client_t *c,
+    const demo_joint_v1_BurnRequest *req,
+    demo_joint_v1_BurnReply *rep,
+    int32_t *status,
+    const qmp_call_opts_t *opts) {
+    return qmp_client_call(c, DEMO_JOINT_V1_JOINT_M_BURN, req, sizeof(*req), rep, sizeof(*rep),
+                           status, opts);
+}
+
+int demo_joint_v1_Joint_Burn(qmp_client_t *c,
+    const demo_joint_v1_BurnRequest *req,
+    demo_joint_v1_BurnReply *rep,
+    int32_t *status) {
+    return demo_joint_v1_Joint_Burn_ex(c, req, rep, status, NULL);
+}
+
+/* qmp_sub_cb_t -> typed StateChanged callback; runs on the qmp_client_poll() thread. */
+static void demo_joint_v1_Joint_tr_topic_StateChanged(void *ctx, const void *sample, uint32_t len,
+    uint64_t seq, uint64_t dropped) {
+    demo_joint_v1_Joint_StateChanged_sub_t *s = (demo_joint_v1_Joint_StateChanged_sub_t *)ctx;
+    if (len != sizeof(demo_joint_v1_JointState) || s->cb == NULL) {
+        return; /* size mismatch: drop rather than hand out a short sample */
+    }
+    s->cb(s->ctx, (const demo_joint_v1_JointState *)sample, seq, dropped);
+}
+
+int demo_joint_v1_Joint_subscribe_StateChanged(qmp_client_t *c,
+    demo_joint_v1_Joint_StateChanged_sub_t *sub, demo_joint_v1_Joint_StateChanged_cb cb, void *ctx) {
+    sub->cb = cb;
+    sub->ctx = ctx;
+    return qmp_client_subscribe(c, DEMO_JOINT_V1_JOINT_T_STATECHANGED, &sub->sample,
+                                sizeof(sub->sample), demo_joint_v1_Joint_tr_topic_StateChanged,
+                                sub, &sub->sub);
+}
+
+int demo_joint_v1_Joint_unsubscribe_StateChanged(qmp_client_t *c,
+    demo_joint_v1_Joint_StateChanged_sub_t *sub) {
+    return qmp_client_unsubscribe(c, &sub->sub);
+}
+
+/* qmp_sub_cb_t -> typed StateLog callback; runs on the qmp_client_poll() thread. */
+static void demo_joint_v1_Joint_tr_topic_StateLog(void *ctx, const void *sample, uint32_t len,
+    uint64_t seq, uint64_t dropped) {
+    demo_joint_v1_Joint_StateLog_sub_t *s = (demo_joint_v1_Joint_StateLog_sub_t *)ctx;
+    if (len != sizeof(demo_joint_v1_JointState) || s->cb == NULL) {
+        return; /* size mismatch: drop rather than hand out a short sample */
+    }
+    s->cb(s->ctx, (const demo_joint_v1_JointState *)sample, seq, dropped);
+}
+
+int demo_joint_v1_Joint_subscribe_StateLog(qmp_client_t *c,
+    demo_joint_v1_Joint_StateLog_sub_t *sub, demo_joint_v1_Joint_StateLog_cb cb, void *ctx) {
+    sub->cb = cb;
+    sub->ctx = ctx;
+    return qmp_client_subscribe(c, DEMO_JOINT_V1_JOINT_T_STATELOG, &sub->sample,
+                                sizeof(sub->sample), demo_joint_v1_Joint_tr_topic_StateLog,
+                                sub, &sub->sub);
+}
+
+int demo_joint_v1_Joint_unsubscribe_StateLog(qmp_client_t *c,
+    demo_joint_v1_Joint_StateLog_sub_t *sub) {
+    return qmp_client_unsubscribe(c, &sub->sub);
+}
+

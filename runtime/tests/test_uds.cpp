@@ -605,6 +605,26 @@ TEST_F(UdsE2E, HandshakeAndRoundTripWithoutInheritedPriority) {
     EXPECT_EQ(qmp_client_close(&c), EOK);
 }
 
+TEST_F(UdsE2E, ReflectionCrossesTheSocketInChunks) {
+    qmp_client_t c;
+    ASSERT_EQ(connect_joint(c), EOK);
+    const std::string want(reinterpret_cast<const char *>(demo_joint_v1_Joint_reflect_json),
+                           demo_joint_v1_Joint_reflect_json_len);
+    std::string got;
+    char buf[QMP_REFLECT_CHUNK_MAX];
+    uint32_t total = 0;
+    do {
+        uint32_t len = 0;
+        ASSERT_EQ(qmp_client_reflect(&c, static_cast<uint32_t>(got.size()), buf, sizeof(buf), &len,
+                                     &total),
+                  EOK);
+        ASSERT_GT(len, 0u);
+        got.append(buf, len);
+    } while (got.size() < total);
+    EXPECT_EQ(got, want);
+    EXPECT_EQ(qmp_client_close(&c), EOK);
+}
+
 TEST_F(UdsE2E, ConcurrentClientsAcrossWorkers) {
     constexpr int kClients = 4;
     constexpr int kIter = 200;
@@ -741,8 +761,8 @@ void defer_cancel(void *ctx, qmp_req_t *req) {
 
 const qmp_method_desc_t kDMethods[] = {
     {1, 0, sizeof(DIn), sizeof(DIn), 0, nullptr, defer_handler, "Defer"}};
-const qmp_service_desc_t kDDesc = {kDSvc, 1,    0, QMP_HDR_SIZE + 64, "test.UdsDefer", kDMethods,
-                                   1,     NULL, 0};
+const qmp_service_desc_t kDDesc = {
+    kDSvc, 1, 0, QMP_HDR_SIZE + 64, "test.UdsDefer", kDMethods, 1, NULL, 0, NULL, 0};
 
 TEST(UdsDeferred, ReplyLaterAndCancelOnClientTimeout) {
     use_private_socket_dir();

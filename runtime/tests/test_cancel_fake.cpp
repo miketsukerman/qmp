@@ -126,8 +126,8 @@ const qmp_method_desc_t kMethods[] = {
     {kMBlock, 0, sizeof(EchoIn), sizeof(EchoOut), 0, nullptr, block_handler, "Block"},
 };
 
-const qmp_service_desc_t kDesc = {kSvc, 1,    0, QMP_HDR_SIZE + 64, "test.Cancel", kMethods,
-                                  3,    NULL, 0};
+const qmp_service_desc_t kDesc = {
+    kSvc, 1, 0, QMP_HDR_SIZE + 64, "test.Cancel", kMethods, 3, NULL, 0, NULL, 0};
 
 class Cancel : public ::testing::Test {
   protected:

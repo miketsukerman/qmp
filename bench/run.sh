@@ -55,19 +55,35 @@ t "mv -f '$BIN.new' '$BIN' && chmod +x '$BIN'"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 fails=0
-run() { # $1 = label, $2.. = benchmark arguments
+run_once() { # $1 = label, $2.. = benchmark arguments
     _label=$1
     shift
-    if t "on -C $CPU '$BIN' --label $_label --dump '$QMP_TARGET_DIR/bench-$_label.ns' $*" \
-        > "$tmp/$_label.out"; then
-        cat "$tmp/$_label.out"
-        # shellcheck disable=SC2086
-        scp -q $SSH_OPTS "$QMP_TARGET:$QMP_TARGET_DIR/bench-$_label.ns" "$tmp/$_label.ns"
-    else
-        echo "FAILED: $_label" >&2
-        fails=$((fails + 1))
-    fi
+    t "on -C $CPU '$BIN' --label $_label --dump '$QMP_TARGET_DIR/bench-$_label.ns' $*" \
+        > "$tmp/$_label.out" || return 1
+    # shellcheck disable=SC2086
+    scp -q $SSH_OPTS "$QMP_TARGET:$QMP_TARGET_DIR/bench-$_label.ns" "$tmp/$_label.ns"
 }
+
+# A run that fails (the board dropped off the network or restarted) is repeated once, after
+# the target answers again; the restart is reported so it does not go unnoticed.
+run() {
+    if ! run_once "$@"; then
+        echo "RETRY: $1 failed at $(date -u +%H:%M:%SZ); waiting for the target" >&2
+        _i=0
+        while [ "$_i" -lt 30 ] && ! t true 2>/dev/null; do
+            _i=$((_i + 1))
+            sleep 2
+        done
+        if ! run_once "$@"; then
+            echo "FAILED: $1" >&2
+            fails=$((fails + 1))
+            return 0
+        fi
+        retries=$((retries + 1))
+    fi
+    cat "$tmp/$1.out"
+}
+retries=0
 
 echo "target: $(t 'uname -srm')  cpu=$CPU"
 run qnx-quiet       --transport qnx --hog-burst-ms 0 "$@"
@@ -83,4 +99,5 @@ mkdir -p "$out"
 cat "$tmp"/*.out > "$out/summary.txt"
 cp "$tmp"/*.ns "$out/" 2>/dev/null || true
 echo "results: $out"
+[ "$retries" -eq 0 ] || echo "note: $retries run(s) had to be repeated after the target stopped answering" >&2
 exit "$fails"

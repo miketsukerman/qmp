@@ -12,6 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <qmp/qmp_version.h>
+
 #ifdef __cplusplus
 #define QMP_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
 #define QMP_ALIGNOF(T)               alignof(T)
@@ -20,10 +22,6 @@ extern "C" {
 #define QMP_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
 #define QMP_ALIGNOF(T)               _Alignof(T)
 #endif
-
-#define QMP_VERSION_MAJOR 0
-#define QMP_VERSION_MINOR 1
-#define QMP_VERSION_PATCH 0
 
 #ifndef EOK
 #define EOK 0
@@ -99,17 +97,19 @@ typedef struct qmp_hello {
     uint16_t instance_id;
     uint8_t ver_major;
     uint8_t ver_minor;
-    uint8_t _pad0[2];
+    uint8_t wire_version; /* QMP_WIRE_VERSION of the client; 0 (pre-0.3.0 peer) means 1 */
+    uint8_t _pad0;
 } qmp_hello_t;
 QMP_STATIC_ASSERT(sizeof(qmp_hello_t) == 8, "layout");
 
 typedef struct qmp_hello_reply {
     uint8_t ver_major;
     uint8_t ver_minor;
-    uint8_t _pad0[2];
+    uint8_t wire_version; /* QMP_WIRE_VERSION of the server; 0 (pre-0.3.0 peer) means 1 */
+    uint8_t _pad0;
     uint32_t server_generation; /* changes when the server restarts */
     uint32_t max_msg_size;      /* header + largest payload the server accepts */
-    uint32_t _pad1;
+    uint32_t runtime_version;   /* server's QMP_VERSION_HEX; 0 = unknown (pre-0.3.0 peer) */
 } qmp_hello_reply_t;
 QMP_STATIC_ASSERT(sizeof(qmp_hello_reply_t) == 16, "layout");
 
@@ -220,6 +220,24 @@ int qmp_service_path(char *buf, size_t cap, uint16_t service_id, uint16_t instan
 /* Returns EOK if client (major, minor) may talk to server (major, minor); else ENOTSUP. */
 int qmp_version_compatible(uint8_t server_major, uint8_t server_minor, uint8_t client_major,
                            uint8_t client_minor);
+
+/* ---- product and wire version of the linked library (ADR-011) ------------ */
+/* "MAJOR.MINOR.PATCH" of the linked libqmp, e.g. "0.3.0". Never NULL. */
+const char *qmp_version_string(void);
+/* QMP_VERSION_HEX of the linked libqmp. */
+uint32_t qmp_version_number(void);
+/* QMP_WIRE_VERSION of the linked libqmp. */
+uint8_t qmp_wire_version(void);
+/* Returns EOK if a peer advertising `peer` (0 = field absent, read as 1) speaks this
+ * library's wire protocol; else ENOTSUP. */
+int qmp_wire_version_compatible(uint8_t peer);
+/* Short git commit hash the library was built from, "-dirty" appended for a modified
+ * tree, "unknown" outside a git checkout. Never NULL. */
+const char *qmp_build_id(void);
+/* Version with build metadata: "0.3.0" for a build of the release tag itself, otherwise
+ * "0.3.0+<commits since tag>.g<hash>[.dirty]" ("0.3.0+g<hash>" if the tag does not exist
+ * yet). Never NULL. */
+const char *qmp_build_version(void);
 
 #ifdef __cplusplus
 }

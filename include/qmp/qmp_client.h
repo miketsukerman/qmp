@@ -117,6 +117,12 @@ int qmp_client_reflect(qmp_client_t *c, uint32_t offset, void *buf, size_t cap, 
 int qmp_client_is_connected(const qmp_client_t *c);
 uint32_t qmp_client_server_generation(const qmp_client_t *c);
 uint8_t qmp_client_server_minor(const qmp_client_t *c);
+/* Wire version the server advertised in HELLO (1 for a pre-0.3.0 server); 0 if never
+ * connected. */
+uint8_t qmp_client_server_wire_version(const qmp_client_t *c);
+/* QMP_VERSION_HEX of the server's libqmp from HELLO; 0 if unknown (pre-0.3.0 server or
+ * never connected). */
+uint32_t qmp_client_server_runtime_version(const qmp_client_t *c);
 
 #ifdef __cplusplus
 }

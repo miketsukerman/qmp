@@ -18,6 +18,9 @@ namespace qmpctl {
 
 using Json = nlohmann::ordered_json;
 
+// The "qmp_reflect_version" this qmpctl reads (REFLECT_VERSION in the generator, ADR-011).
+constexpr uint32_t kReflectVersion = 1;
+
 enum class Kind { Bool, Int32, UInt32, Int64, UInt64, Float, Double, Enum, String, Bytes, Message };
 
 struct Field {

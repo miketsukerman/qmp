@@ -104,6 +104,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: one product version in the header, the generator and the changelog (ADR-011)
+        run: scripts/check-version.sh
       - name: every VERIFY() marker in sources has an entry in docs/VERIFY.md
         run: |
           set -e

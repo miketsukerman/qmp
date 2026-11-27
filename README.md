@@ -74,6 +74,42 @@ only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 | on target | RPi5, build `3cd249234123` (2026-11-27): 88/88 `qmp_core_tests` cases (22 over UDS), `qmpctl_tests` 33/33 runnable on the native transport and 34/34 over UDS, 22/22 `scripts/target-smoke.sh` scenarios (four of them through `qmpctl`). Build `a4230da3880c`: joint demo over `--transport uds` and `qnx`; results recorded in [docs/VERIFY.md](docs/VERIFY.md). Same-board round trip, `loop 5000` with a 5 s timeout: native median 4.0 µs / p99 5.7 µs, UDS median 57.8 µs / p99 68.5 µs (a first look, not the W4 benchmark) |
 | next | bench, secpol generation, uProtocol adapter (W4, adapter is stretch); C++ wrappers and one-way trampolines in the generator (stretch) |
 
+## Versioning
+
+qmp follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). One version covers
+`libqmp`, `protoc-gen-qmp` and `qmpctl`; it is defined once, in
+[`include/qmp/qmp_version.h`](include/qmp/qmp_version.h). Releases are tags `vX.Y.Z` and
+are described in [CHANGELOG.md](CHANGELOG.md). The rules for what counts as major, minor
+and patch are in [ADR-011](docs/DECISIONS.md).
+
+| Number | Now | Answers | Where |
+|--------|-----|---------|-------|
+| product version | 0.3.0 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
+| wire version | 1 | can these two processes talk? Equal means yes | `QMP_WIRE_VERSION`, exchanged in HELLO |
+| reflection version | 1 | can this `qmpctl` read that service's description? | `qmp_reflect_version` in the reflection JSON |
+| service version | per service | is this client compatible with that interface? | `(uprotocol.service_version_*)` in the `.proto` |
+
+While the version is 0.y.z, a breaking change bumps the minor number, and generated code
+must be regenerated for every new minor (the generated header refuses to compile
+otherwise).
+
+```sh
+$ qmpctl --version
+qmpctl 0.3.0 (wire 1, reflect 1) build=3cd249234123 transport=qnx
+$ qmpctl --version --json
+{"version":"0.3.0","build_version":"0.3.0","wire":1,"reflect":1,"build":"3cd249234123","transport":"qnx"}
+```
+
+`build` is the commit the binary was built from. A build that is not the release tag
+itself reports build metadata after the version, for example `0.3.0+4.g3cd249234123` for
+four commits after `v0.3.0`. `qmpctl describe <service>` shows the runtime, wire version
+and generator of the remote service.
+
+To release: bump `qmp_version.h` and `codegen/protoc_gen_qmp/__init__.py`, move
+`[Unreleased]` in the changelog to the new version (`scripts/check-version.sh` checks all
+three), merge, run the target tests on the board, then push an annotated tag
+`vX.Y.Z`. The `release` workflow verifies the tag and publishes the GitHub Release.
+
 ## Build from a clean machine (Ubuntu 24.04, host build)
 
 ```sh

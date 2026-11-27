@@ -351,3 +351,82 @@ connect to the channel; it is not covered by the per-method ACL hook (it reveals
 layouts, never data). A deployment that considers this sensitive restricts `channel connect`
 with secpol, or registers a descriptor without the blob. − Servers built before this ADR answer
 `ENOSYS` and need `--reflect`.
+
+---
+
+## ADR-011 Semantic versioning: one product version, a separate wire version
+
+**Status:** accepted 2026-11-27 (W3).
+
+**Context.** The number 0.1.0 was typed by hand in four places (`CMakeLists.txt`, `qmp.h`,
+`codegen/pyproject.toml`, `protoc_gen_qmp/__init__.py`) and had not moved since W1, there
+were no tags and no changelog. "Wire protocol v1" existed only as a phrase in DESIGN §2 and
+as the fixed value of `QMP_MSG_TYPE`. Nothing told a user whether two builds can talk, or
+whether generated code fits the runtime it is compiled against.
+
+**Decision.**
+1. *One product version, SemVer 2.0.0,* for `libqmp`, `protoc-gen-qmp` and `qmpctl`
+   together. They are released from one tree and generated code is tightly coupled to the
+   runtime, so separate numbers would only add a compatibility matrix.
+2. *`include/qmp/qmp_version.h` is the single source of truth.* It is checked in, not
+   generated, so the generated code and consumers that do not use CMake see it with a plain
+   `-Iinclude`. CMake parses it for `project(VERSION)`; `scripts/check-version.sh` (CI)
+   compares it with the generator's `__version__`, the newest `CHANGELOG.md` section and,
+   on a release, the tag.
+3. *The wire protocol has its own integer, `QMP_WIRE_VERSION`,* covering the header layout,
+   flag bits, control opcodes and their payloads, status codes and topic delivery
+   semantics. Two processes can talk if and only if their wire versions are equal. HELLO
+   carries it in both directions in a byte that every earlier build sent as zeroed padding;
+   0 is read as 1. A mismatch is `ENOTSUP` at HELLO. The HELLO reply also carries the
+   server's `QMP_VERSION_HEX` (0 = unknown) for tools.
+4. *What moves which number.* The question is always whether something built against the
+   previous release still compiles, links, talks and parses unchanged.
+
+   | Surface | Major | Minor | Patch |
+   |---------|-------|-------|-------|
+   | C API (`include/qmp/`) | remove or rename; change a signature or the meaning of an error code | add a function, macro, enum value or option | fix behaviour to match the documented contract |
+   | C ABI (ADR-006) | change size or layout of a public struct, including caller-provided storage | use bytes that were reserved and zeroed | — |
+   | Wire protocol | anything that bumps `QMP_WIRE_VERSION` | new control opcode; new use of a reserved or padding byte | — |
+   | Transports | remove one; change the `qmp/<svc>-<inst>/v<major>` naming or the `qmp_transport_t` vtable | add a transport or a transport option | fix without changing semantics |
+   | Generator, generated code | previously generated code no longer compiles or links; generated names change | new generated functions, `.proto` options, reflection JSON fields | output changes that do not alter the generated API |
+   | `qmpctl` | remove or rename a command or flag; change JSON output fields or exit codes | new command, flag or JSON field | wording of human-readable output |
+
+   While the version is 0.y.z a breaking change bumps the *minor* (SemVer §4); additions
+   and fixes go in the patch number. `runtime/core/internal.h`, the fake transport's
+   internals, tests, examples and benchmark numbers are not versioned surfaces.
+5. *Generated code is pinned to its runtime.* The generated header fails with `#error`
+   unless the runtime has the same minor (0.x), or the same major and an equal or newer
+   minor (from 1.0).
+6. *Four numbers, each answering one question:* product version (which API, generator and
+   tools?), wire version (can these two processes talk?), reflection version
+   `qmp_reflect_version` (can this qmpctl read that description? ADR-010), and the
+   per-service `major.minor` from the `.proto` (is this client compatible with that
+   interface? DESIGN §7), which belongs to the service author.
+7. *Releases.* An annotated tag `vX.Y.Z` on `main` whose name equals the header version;
+   release candidates are `vX.Y.Z-rc.N`. `CHANGELOG.md` (Keep a Changelog) is written by
+   hand and names the wire and reflection versions of every release. The tag makes CI
+   publish a GitHub Release; the QNX build and the RPi5 run stay manual (no SDP in CI) and
+   happen before the tag. Between releases the header keeps the last released number and
+   `qmp_build_version()` adds SemVer build metadata (`0.3.0+4.g<hash>`); `qmp_build_id()`
+   stays the plain commit hash that target logs are matched against.
+8. *First release is 0.3.0,* one minor per completed weekly milestone (W1 → 0.1.0, W2 →
+   0.2.0, W3 → 0.3.0); the two older ones exist only as changelog entries. 1.0.0 is
+   reserved for the point where wire version 1 and the C ABI are declared frozen, which is
+   not before the W4 benchmark and adapter work.
+
+**Alternatives considered.** (a) Generate the header from `project(VERSION)`: one fewer
+parse step in CMake, but generated code compiled outside CMake (CI does this) would need a
+build directory on its include path. (b) A `VERSION` text file: the generator's packaging
+cannot read a file above its own project root, so a consistency check would be needed
+anyway. (c) Version the generator separately: a matrix nobody needs yet. (d) Put the wire
+version in `qmp_hdr_t.reserved`: costs nothing either, but would be checked on every
+message for a property that cannot change after HELLO. (e) Only define the constant: a
+future wire v2 would then fail with a malformed-message error instead of a clear refusal.
+
+**Consequences.** + Every binary and every log line can name its release
+(`qmpctl --version`, the demo banners), and `qmpctl describe` shows what a remote service
+was built with. + A future incompatible wire change is refused at connect time. + Stale
+generated code is a compile error, not a runtime surprise. − The version must be bumped in
+two files (header and generator) per release; CI catches a mismatch. − Each release needs a
+changelog entry and a manual target run before tagging. − A 0.2.0 peer is indistinguishable
+from a wire-v1 peer that chose to send 0; this is intended.

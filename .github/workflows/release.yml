@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: Apache-2.0
+# Publishes a GitHub Release when a version tag is pushed (ADR-011). The tag must equal the
+# version in include/qmp/qmp_version.h. No QNX SDP in CI (licence): the cross build and the
+# RPi5 run are done by hand BEFORE tagging and recorded in docs/VERIFY.md.
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release; nothing else in this repository's CI may write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # qmp_build_version() counts commits since the tag
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: tag matches the version header, generator and changelog
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME%%-rc.*}"
+          scripts/check-version.sh "$tag"
+          echo "version=$(scripts/check-version.sh --print)" >> "$GITHUB_OUTPUT"
+      - run: pip install -e "codegen[dev]" build
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build protobuf-compiler libprotobuf-dev
+      - name: codegen tests
+        working-directory: codegen
+        run: python3 -m pytest tests -q
+      - name: host build and tests (release configuration)
+        run: |
+          cmake --preset host-release
+          cmake --build build/host-release
+          ctest --test-dir build/host-release --output-on-failure
+      - name: the binary reports the released version
+        run: |
+          out=$(build/host-release/tools/qmpctl/qmpctl --version)
+          echo "$out"
+          v=${{ steps.version.outputs.version }}
+          case "$GITHUB_REF_NAME" in
+            *-rc.*) want="qmpctl $v+" ;;      # a candidate is a build ahead of the final tag
+            *)      want="qmpctl $v (wire " ;; # the release itself carries no build metadata
+          esac
+          case "$out" in
+            "$want"*) ;;
+            *) echo "::error::expected '$want...'"; exit 1 ;;
+          esac
+      - name: assemble release files
+        run: |
+          v=${{ steps.version.outputs.version }}
+          mkdir dist
+          git archive --format=tar.gz --prefix="qmp-$v/" -o "dist/qmp-$v.tar.gz" "$GITHUB_SHA"
+          python3 -m build --wheel --outdir dist codegen
+          cp build/host-release/tools/qmpctl/qmpctl "dist/qmpctl-$v-linux-x86_64"
+          # Release notes: this version's section of CHANGELOG.md.
+          awk -v v="$v" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/        { exit }
+            on && /^\[[^]]*\]: /  { next }
+            on                    { print }' CHANGELOG.md > notes.md
+          test -s notes.md
+          (cd dist && sha256sum * > SHA256SUMS)
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=""
+          case "$GITHUB_REF_NAME" in *-rc.*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+            --title "qmp ${GITHUB_REF_NAME#v}" --notes-file notes.md $flags

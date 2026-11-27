@@ -24,7 +24,6 @@
 
 #include "codec.hpp"
 #include "discover.hpp"
-#include "qmp_build_id.h"
 #include "reflect.hpp"
 
 namespace qmpctl {
@@ -64,7 +63,7 @@ const char kUsage[] =
     "  --timeout MS              per-call timeout, 0 = wait forever (default 2000)\n"
     "  --reflect FILE            <svc>.reflect.json for services that do not serve their\n"
     "                            own reflection data (repeatable)\n"
-    "  --json                    list/describe: machine-readable output\n"
+    "  --json                    list/describe/--version: machine-readable output\n"
     "  --pretty                  indent JSON output\n"
     "  --count N                 subscribe: stop after N updates\n"
     "  --duration MS             subscribe: stop after MS milliseconds\n"
@@ -588,6 +587,21 @@ int cmd_describe(const Options &opt, Io &io) {
                << static_cast<unsigned>(qmp_client_server_minor(&s.client)) << "\n"
                << "  uuri      " << svc.uuri << "\n"
                << "  endpoint  " << s.ep.path() << "  (transport " << opt.transport_name << ")\n";
+        // What the service was built with: its libqmp (from HELLO) and its generator (from
+        // the reflection data). A server older than 0.3.0 does not say.
+        const uint32_t rtv = qmp_client_server_runtime_version(&s.client);
+        io.out << "  runtime   ";
+        if (rtv != 0) {
+            io.out << (rtv >> 16) << "." << ((rtv >> 8) & 0xFFU) << "." << (rtv & 0xFFU);
+        } else {
+            io.out << "unknown (older than 0.3.0)";
+        }
+        io.out << "  (wire " << static_cast<unsigned>(qmp_client_server_wire_version(&s.client))
+               << ")\n";
+        auto gen = doc.raw.find("generator");
+        if (gen != doc.raw.end() && gen->is_string()) {
+            io.out << "  generator " << gen->get<std::string>() << "\n";
+        }
         if (s.from_file) {
             io.out << "  note      described from a --reflect file, not by the service\n";
         }
@@ -1060,9 +1074,20 @@ int run(const std::vector<std::string> &args, std::istream &in, std::ostream &ou
         }
     }
     if (version) {
-        out << "qmpctl " << QMP_VERSION_MAJOR << "." << QMP_VERSION_MINOR << "."
-            << QMP_VERSION_PATCH << " build=" << QMP_BUILD_ID << " transport=" << opt.transport_name
-            << "\n";
+        if (opt.json) {
+            Json j = Json::object();
+            j["version"] = qmp_version_string();
+            j["build_version"] = qmp_build_version();
+            j["wire"] = qmp_wire_version();
+            j["reflect"] = kReflectVersion;
+            j["build"] = qmp_build_id();
+            j["transport"] = opt.transport_name;
+            out << dump(j, opt.pretty) << "\n";
+            return kExitOk;
+        }
+        out << "qmpctl " << qmp_build_version() << " (wire "
+            << static_cast<unsigned>(qmp_wire_version()) << ", reflect " << kReflectVersion
+            << ") build=" << qmp_build_id() << " transport=" << opt.transport_name << "\n";
         return kExitOk;
     }
     if (opt.timeout_ms > UINT64_MAX / kNsPerMs || opt.duration_ms > UINT64_MAX / kNsPerMs) {

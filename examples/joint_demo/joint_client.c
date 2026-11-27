@@ -48,7 +48,6 @@
 #include <unistd.h>
 
 #include "joint.qmp.h"
-#include "qmp_build_id.h"
 
 #define LOOP_MAX 1000000
 
@@ -125,7 +124,9 @@ static void log_event(const char *fmt, ...) {
         off += (size_t)m < sizeof(buf) - off ? (size_t)m : sizeof(buf) - 1 - off;
     }
     buf[off++] = '\n';
-    (void)write(STDERR_FILENO, buf, off);
+    /* Best effort; a (void) cast does not silence glibc's warn_unused_result. */
+    ssize_t written = write(STDERR_FILENO, buf, off);
+    (void)written;
 }
 #define LOGF log_event
 
@@ -417,9 +418,10 @@ int main(int argc, char **argv) {
                 DEMO_JOINT_V1_JOINT_QNX_PATH, rc, strerror(rc));
         return 1;
     }
-    LOGF("connected pid=%d build=%s service=%s transport=%s generation=%" PRIu32 " timeout_ms=%ld",
-         (int)getpid(), QMP_BUILD_ID, DEMO_JOINT_V1_JOINT_SERVICE_NAME, tr->name,
-         qmp_client_server_generation(&c), timeout_ms);
+    LOGF("connected pid=%d version=%s build=%s service=%s transport=%s generation=%" PRIu32
+         " timeout_ms=%ld",
+         (int)getpid(), qmp_build_version(), qmp_build_id(), DEMO_JOINT_V1_JOINT_SERVICE_NAME,
+         tr->name, qmp_client_server_generation(&c), timeout_ms);
 
     int outcome;
     if (strcmp(mode, "once") == 0) {

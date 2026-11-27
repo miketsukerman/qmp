@@ -301,6 +301,9 @@ TEST_F(Cli, DescribeServiceByNameAndById) {
     EXPECT_TRUE(contains(r.out, "id        0x0777  instance 0x0000"));
     EXPECT_TRUE(contains(r.out, "version   2.3"));
     EXPECT_TRUE(contains(r.out, "endpoint  qmp/0777-0000/v2"));
+    EXPECT_TRUE(contains(r.out, std::string("runtime   ") + QMP_VERSION_STRING + "  (wire " +
+                                    std::to_string(QMP_WIRE_VERSION) + ")\n"))
+        << r.out;
     EXPECT_TRUE(contains(r.out, "0x0001  Echo(qmp.test.kitchen.v1.Sink) returns "
                                 "(qmp.test.kitchen.v1.Sink)"));
     EXPECT_TRUE(contains(r.out, "0x0004  Fire(qmp.test.kitchen.v1.Inner) returns "
@@ -734,8 +737,23 @@ TEST(CliUsage, HelpVersionAndErrors) {
     }
     r = run({"--version"});
     EXPECT_EQ(r.code, 0);
-    EXPECT_TRUE(contains(r.out, "qmpctl 0.1.0 build=")) << r.out;
-    EXPECT_TRUE(contains(r.out, std::string("transport=") + qmp_transport_default()->name));
+    EXPECT_EQ(r.out.rfind(std::string("qmpctl ") + QMP_VERSION_STRING, 0), 0u) << r.out;
+    EXPECT_TRUE(contains(r.out, std::string("qmpctl ") + qmp_build_version() + " (wire " +
+                                    std::to_string(QMP_WIRE_VERSION) +
+                                    ", reflect 1) build=" + qmp_build_id() +
+                                    " transport=" + qmp_transport_default()->name + "\n"))
+        << r.out;
+    r = run({"--version", "--json"});
+    EXPECT_EQ(r.code, 0);
+    {
+        Json j = Json::parse(r.out);
+        EXPECT_EQ(j["version"], QMP_VERSION_STRING);
+        EXPECT_EQ(j["build_version"], qmp_build_version());
+        EXPECT_EQ(j["wire"], QMP_WIRE_VERSION);
+        EXPECT_EQ(j["reflect"], 1);
+        EXPECT_EQ(j["build"], qmp_build_id());
+        EXPECT_EQ(j["transport"], qmp_transport_default()->name);
+    }
 
     r = run({});
     EXPECT_EQ(r.code, 2);

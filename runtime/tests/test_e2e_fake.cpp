@@ -294,7 +294,7 @@ TEST_F(E2E, MajorMismatchAtHelloIsENOTSUP) {
     ASSERT_EQ(qmp_client_connect(&c, DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, 1, 0), EOK);
     qmp_hdr_t req_hdr;
     qmp_hdr_t rep_hdr;
-    qmp_hello_t hello{DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, 2, 0, {0, 0}};
+    qmp_hello_t hello{DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, 2, 0, QMP_WIRE_VERSION, 0};
     qmp_hello_reply_t hr{};
     qmp_hdr_init(&req_hdr, DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, QMP_OP_HELLO, 2, 0, QMP_F_CONTROL,
                  sizeof(hello));
@@ -305,6 +305,52 @@ TEST_F(E2E, MajorMismatchAtHelloIsENOTSUP) {
     ASSERT_EQ(qmp_transport_fake()->connect(&conn, DEMO_JOINT_V1_JOINT_QNX_PATH), EOK);
     EXPECT_EQ(qmp_transport_fake()->call(&conn, siov, 2, riov, 2, 0, &len), ENOTSUP);
     qmp_client_close(&c);
+}
+
+TEST_F(E2E, HelloCarriesWireAndRuntimeVersion) {
+    qmp_client_t c;
+    qmp_client_cfg_t ccfg = client_cfg(qmp_transport_fake(), 0);
+    ASSERT_EQ(qmp_client_init(&c, &ccfg), EOK);
+    EXPECT_EQ(qmp_client_server_wire_version(&c), 0);
+    EXPECT_EQ(qmp_client_server_runtime_version(&c), 0u);
+    ASSERT_EQ(qmp_client_connect(&c, DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, 1, 0), EOK);
+    EXPECT_EQ(qmp_client_server_wire_version(&c), QMP_WIRE_VERSION);
+    EXPECT_EQ(qmp_client_server_runtime_version(&c), static_cast<uint32_t>(QMP_VERSION_HEX));
+    qmp_client_close(&c);
+}
+
+TEST_F(E2E, WireVersionAtHello) {
+    /* wire_version 0 is a pre-0.3.0 client (the byte was zeroed padding): accepted as 1.
+     * Any other value than ours is a different protocol: ENOTSUP before anything else. */
+    struct Case {
+        uint8_t wire;
+        int want;
+    };
+    const Case cases[] = {{0, EOK},
+                          {QMP_WIRE_VERSION, EOK},
+                          {static_cast<uint8_t>(QMP_WIRE_VERSION + 1), ENOTSUP},
+                          {255, ENOTSUP}};
+    for (const Case &tc : cases) {
+        qmp_hdr_t req_hdr;
+        qmp_hdr_t rep_hdr;
+        qmp_hello_t hello{DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, 1, 0, tc.wire, 0};
+        qmp_hello_reply_t hr{};
+        qmp_hdr_init(&req_hdr, DEMO_JOINT_V1_JOINT_SERVICE_ID, 0, QMP_OP_HELLO, 1, 0, QMP_F_CONTROL,
+                     sizeof(hello));
+        qmp_iov_t siov[2] = {{&req_hdr, sizeof(req_hdr)}, {&hello, sizeof(hello)}};
+        qmp_iov_t riov[2] = {{&rep_hdr, sizeof(rep_hdr)}, {&hr, sizeof(hr)}};
+        size_t len = 0;
+        qmp_conn_t conn;
+        ASSERT_EQ(qmp_transport_fake()->connect(&conn, DEMO_JOINT_V1_JOINT_QNX_PATH), EOK);
+        EXPECT_EQ(qmp_transport_fake()->call(&conn, siov, 2, riov, 2, 0, &len), tc.want)
+            << "wire_version " << static_cast<unsigned>(tc.wire);
+        if (tc.want == EOK) {
+            EXPECT_EQ(hr.wire_version, QMP_WIRE_VERSION);
+            EXPECT_EQ(hr.runtime_version, static_cast<uint32_t>(QMP_VERSION_HEX));
+            EXPECT_EQ(hr._pad0, 0);
+        }
+        (void)qmp_transport_fake()->disconnect(&conn);
+    }
 }
 
 TEST_F(E2E, MinorSkewIsAccepted) {

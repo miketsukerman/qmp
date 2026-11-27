@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "protoc-gen-qmp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "protoc plugin generating C11/C++17 bindings for qmp (QNX message passing)"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
@@ -15,6 +15,9 @@ dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "types-protobuf", "grpcio-tools>=
 
 [project.scripts]
 protoc-gen-qmp = "protoc_gen_qmp.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "protoc_gen_qmp.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["."]

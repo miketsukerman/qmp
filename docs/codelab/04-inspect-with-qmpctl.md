@@ -57,6 +57,8 @@ service demo.joint.v1.Joint
   version   1.0
   uuri      /101/1
   endpoint  qmp/0101-0000/v1  (transport uds)
+  runtime   0.3.0  (wire 1)
+  generator protoc-gen-qmp 0.3.0
 
 methods:
   0x0001  SetTarget(demo.joint.v1.SetTargetRequest) returns (demo.joint.v1.SetTargetReply)

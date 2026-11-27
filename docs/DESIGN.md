@@ -236,9 +236,14 @@ pool is caller-provided (`qmp_req_t slots[8]`); when full the server replies `Ms
 ```
  client (prio 30)                           worker T1
  MsgSendv([hdr ONEWAY, Stop payload_len=0]) ──►  T1 @30: validate, MsgReplyv(rcvid, 0, [hdr IS_REPLY]) immediately
- ◄──── returns EOK (handler has NOT run yet)      reply drops inheritance → T1 back to base 10
+ ◄──── returns EOK (handler has NOT run yet)      runtime restores T1's own priority (10)
                                                   ops->Stop(ctx, &info)  runs at T1's base priority
 ```
+
+The kernel does not lower T1 by itself: on QNX 8 a receiving thread keeps the sender's
+priority after the reply until its next receive (V-QNX-011, measured on the RPi5). libqmp
+therefore records each worker's priority before its first receive and sets it back after the
+receipt reply of a one-way request.
 
 Reply-before-work keeps the caller unblocked for the minimum time; the trade-off (handler runs at
 server base priority, not caller priority) is documented in the handler callback docs.

@@ -37,7 +37,7 @@ jobs:
       - name: cppcheck
         run: |
           cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability \
-            --std=c11 -Iinclude runtime/core runtime/transport/fake runtime/transport/uds examples/joint_demo/joint_service.c
+            --std=c11 -Iinclude runtime/core runtime/transport/fake runtime/transport/uds examples/joint_demo/joint_server.c
 
   codegen:
     runs-on: ubuntu-24.04

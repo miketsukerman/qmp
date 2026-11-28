@@ -5,6 +5,9 @@
 #                                                      (qmp_client_t -> qmp_client_impl_t) is intentional
 #   performance-no-int-to-ptr                       — (void *)(uintptr_t) is how const is dropped for
 #                                                      iov_base without -Wcast-qual noise
+#   readability-math-missing-parentheses, readability-use-concise-preprocessor-directives
+#                                                   — style checks added in clang-tidy 19/21; the tree is
+#                                                      kept clean for the clang-tidy 18 of Ubuntu 24.04
 Checks: >
   bugprone-*,
   cert-*,
@@ -18,6 +21,8 @@ Checks: >
   -bugprone-casting-through-void,
   -performance-no-int-to-ptr,
   -misc-include-cleaner,
+  -readability-math-missing-parentheses,
+  -readability-use-concise-preprocessor-directives,
   -cert-err33-c,
   -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
 WarningsAsErrors: '*'

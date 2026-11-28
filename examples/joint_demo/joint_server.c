@@ -430,7 +430,7 @@ int main(int argc, char **argv) {
     ops.GetState = on_get_state;
     ops.Burn = on_burn;
 
-    qmp_server_t server;
+    static qmp_server_t server; /* outlives main's frame: the signal thread holds it */
     qmp_server_cfg_t cfg = {.transport = tr,
                             .nthreads = nthreads,
                             .listen_flags = fixed_priority ? QMP_LISTEN_FIXED_PRIORITY : 0,

@@ -32,6 +32,7 @@ With QNX SDP 8.0 on the host and the quick-start image on the board
 ([details](#qnx-target-build-manual--no-sdp-in-ci)):
 
 ```sh
+python3 -m venv .venv && . .venv/bin/activate && pip install -e codegen   # the code generator
 source ~/qnx800/qnxsdp-env.sh
 cmake --preset qnx-aarch64le && cmake --build build/qnx-aarch64le
 export QMP_TARGET=qnxuser@<pi5-address>
@@ -119,7 +120,7 @@ client, so topics use notify-then-pull over registered events. The same core
 also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
 only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Status (0.3.5, W4)
+## Status (0.3.6, W4)
 
 | Area | State |
 |------|-------|
@@ -143,7 +144,7 @@ and patch are in [ADR-011](docs/DECISIONS.md).
 
 | Number | Now | Answers | Where |
 |--------|-----|---------|-------|
-| product version | 0.3.5 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
+| product version | 0.3.6 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
 | wire version | 1 | can these two processes talk? Equal means yes | `QMP_WIRE_VERSION`, exchanged in HELLO |
 | reflection version | 1 | can this `qmpctl` read that service's description? | `qmp_reflect_version` in the reflection JSON |
 | service version | per service | is this client compatible with that interface? | `(uprotocol.service_version_*)` in the `.proto` |
@@ -187,7 +188,7 @@ ctest --test-dir build/host-debug --output-on-failure
 Expected tail of the `ctest` output:
 
 ```
-100% tests passed, 0 tests failed out of 123
+100% tests passed, 0 tests failed out of 133
 ```
 
 Generated bindings for the example service land in `build/host-debug/gen/joint/`
@@ -219,7 +220,7 @@ cd codegen
 python3 -m pytest tests -q            # goldens, one fixture per validation error, C11/C++17 compile
 ruff check . && ruff format --check . && mypy --strict protoc_gen_qmp tests
 cd ..
-clang-format --dry-run -Werror $(git ls-files 'include/**/*.h' 'runtime/**/*.[ch]' 'runtime/**/*.cpp' 'examples/**/*.c' 'tools/**/*.[ch]pp')
+clang-format --dry-run -Werror $(git ls-files 'include/**/*.h' 'runtime/**/*.[ch]' 'runtime/**/*.cpp' 'examples/**/*.c' 'bench/**/*.c' 'tools/**/*.c' 'tools/**/*.[ch]pp')
 clang-tidy -p build/host-debug runtime/core/*.c runtime/transport/fake/*.c runtime/transport/uds/*.c
 cppcheck --quiet --error-exitcode=1 --enable=warning,performance,portability --std=c11 \
          -Iinclude runtime/core runtime/transport/fake runtime/transport/uds examples/joint_demo/joint_server.c
@@ -249,6 +250,7 @@ benchmark pass in the final week). x86_64 under QEMU is for functional developme
 for headline latency numbers. Requires QNX SDP 8.0 installed on the host.
 
 ```sh
+. .venv/bin/activate                   # the code generator, installed as in the host build
 source ~/qnx800/qnxsdp-env.sh
 cmake --preset qnx-aarch64le           # qcc -Vgcc_ntoaarch64le / q++ -Vgcc_ntoaarch64le_gpp
 cmake --build build/qnx-aarch64le

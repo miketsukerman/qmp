@@ -13,6 +13,19 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-11-28
+
+Wire version 1 · reflection version 1
+
+### Fixed
+- Building from a fresh clone for QNX without an activated virtualenv failed in the middle
+  of the build with `No module named 'google'`. CMake now also looks for `protoc-gen-qmp`
+  in the checkout's `.venv` or `venv`, and otherwise stops at configure time with the
+  command that installs it. The README states the step.
+- `clang-tidy` 21 and `cppcheck` 2.19 report nothing on the tree any more; the CI
+  `cppcheck` step named a file that no longer exists.
+- README: the expected `ctest` total is 133.
+
 ## [0.3.5] - 2026-11-28
 
 Wire version 1 · reflection version 1

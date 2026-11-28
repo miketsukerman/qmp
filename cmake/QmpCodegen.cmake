@@ -30,12 +30,25 @@ function(_qmp_resolve_codegen_tools)
   if(QMP_PROTOC_GEN_QMP)
     set(_plugin "${QMP_PROTOC_GEN_QMP}")
   else()
-    find_program(_plugin_path protoc-gen-qmp)
+    # On PATH (an activated virtualenv), else in the checkout's own virtualenv, so that a
+    # new shell that only sourced the QNX environment still finds it.
+    find_program(_plugin_path protoc-gen-qmp
+                 HINTS "${PROJECT_SOURCE_DIR}/.venv/bin" "${PROJECT_SOURCE_DIR}/venv/bin")
     if(_plugin_path)
       set(_plugin "${_plugin_path}")
     else()
       if(NOT Python3_Interpreter_FOUND)
         message(FATAL_ERROR "protoc-gen-qmp not found and no python3 for the dev fallback")
+      endif()
+      # The fallback runs the generator from the source tree: fail now, with the remedy,
+      # instead of in the middle of the build with "No module named 'google'".
+      execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import google.protobuf, jinja2"
+                      RESULT_VARIABLE _qmp_py_deps OUTPUT_QUIET ERROR_QUIET)
+      if(NOT _qmp_py_deps EQUAL 0)
+        message(FATAL_ERROR
+          "protoc-gen-qmp is not installed and ${Python3_EXECUTABLE} lacks protobuf/jinja2.\n"
+          "Install the generator into a virtualenv in the checkout, then configure again:\n"
+          "  python3 -m venv .venv && . .venv/bin/activate && pip install -e codegen")
       endif()
       set(_plugin "${CMAKE_BINARY_DIR}/protoc-gen-qmp")
       file(WRITE "${_plugin}"

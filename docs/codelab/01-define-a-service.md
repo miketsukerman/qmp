@@ -295,7 +295,7 @@ struct JointServer {
 };
 ```
 
-The generated `*.qmp.hpp` (planned, W3) will ship exactly this kind of wrapper (`qmp::Result<T>`, RAII
+The generated `*.qmp.hpp` (planned, not implemented yet) will ship exactly this kind of wrapper (`qmp::Result<T>`, RAII
 client/server, virtual-method service base) so you don't write it yourself; the C structs stay
 the single source of truth. Rules: C++17 only, no exceptions, no RTTI, header-only.
 

@@ -1,7 +1,9 @@
 # Repository scaffold proposal (W1)
 
-Proposal only — nothing below exists yet except `docs/` and `.github/`. Approve or amend before
-W1 step 1.
+**Historical.** This is the W1 proposal of 2026-11-09, kept for the record. The repository was
+built from it but differs in places (for example there is no `subs.c`, `deferred.c`,
+`emit_c.py`, `QmpWarnings.cmake`, `include/qmp/cpp/`, `adapters/` or `docs/BENCHMARKS.md`).
+The current layout is in the README.
 
 ## 1. Tree
 

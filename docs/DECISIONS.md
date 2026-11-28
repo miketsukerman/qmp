@@ -66,7 +66,7 @@ channel → sends `SUBSCRIBE{topic, handle}` → server stores `(scoid, handle)`
 copies the sample into the topic's slot/ring and calls `MsgDeliverEvent` with the sequence number
 as pulse value → client pulls the sample with `PULL` (a normal `MsgSend`). `qmp.topic_mode`
 chooses `LATEST` (single slot, coalescing) or `QUEUE{depth}` (ring, `remaining` count returned
-on pull, overflow reported as `DATA_LOSS`). Callbacks run on the thread that calls
+on pull, overflow reported as a `dropped` count, see the amendment). Callbacks run on the thread that calls
 `qmp_client_poll()`; libqmp creates no threads (Q3).
 
 **Consequences.** + Server never blocks on a client; subscribers cannot slow publishers.
@@ -221,6 +221,10 @@ bindings are C11 and compile as C++17 (extern "C" guards). The C++ layer
 wraps the *same* POD structs (type aliases, no conversion). `qmpctl` and the adapter link only
 the C ABI.
 
+**Status of the C++ layer (2026-11-28).** Not implemented: `include/qmp/cpp/` and the
+`*.qmp.hpp` generator output do not exist yet. C++ code uses the C bindings, which compile as
+C++17.
+
 **Consequences.** + One runtime to test and measure; C and C++ interop trivially (interop
 matrix C↔C++). + No libc++ ABI exposure across process/library boundaries. − C++ ergonomics
 limited to what header-only wrappers can express (no coroutines, `Result<T>` instead of
@@ -269,8 +273,8 @@ headline latency numbers. Bring-up guide: `docs/target/rpi5.md`. No CPU tuning f
 (`-mcpu=cortex-a76` is an open item, V-QNX-029). Unverified image properties are tracked as
 V-QNX-026/027/028/030.
 
-**Consequences.** + Published benchmark numbers are Pi 5 numbers (BENCHMARKS.md records the
-board). + Demo runs on current official QNX hardware support. − Pi 4 gets only one
+**Consequences.** + Published benchmark numbers will be Pi 5 numbers (a `docs/BENCHMARKS.md`
+recording the board is not written yet). + Demo runs on current official QNX hardware support. − Pi 4 gets only one
 portability/benchmark pass in the final week. − Active cooling is required on the Pi 5 for all
 benchmark measurements (thermal throttling, V-QNX-028).
 

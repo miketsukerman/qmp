@@ -17,7 +17,8 @@ import "google/protobuf/descriptor.proto";
 enum Mode {
   // Default when unset: a single slot, pulses coalesce, the subscriber pulls the newest sample.
   MODE_LATEST = 0;
-  // Ring buffer of `depth` samples; PULL returns `remaining`; overflow reports DATA_LOSS.
+  // Ring buffer of `depth` samples; PULL returns `remaining`; overflow is reported as a
+  // `dropped` count.
   MODE_QUEUE = 1;
 }
 
@@ -42,7 +43,8 @@ extend google.protobuf.FieldOptions {
 extend google.protobuf.MethodOptions {
   // The server replies before running the handler; the reply type must have zero fields.
   optional bool oneway = 50010;
-  // Security-policy type names allowed to call this method (checked via ConnectClientInfoExt).
+  // Security-policy type names allowed to call this method. Recorded in the reflection data;
+  // the runtime does not enforce it yet (V-QNX-014).
   repeated string allow_types = 50011;
 }
 

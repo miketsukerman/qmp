@@ -1,7 +1,9 @@
 # qmp design
 
 Service-oriented communication over QNX native message passing, with uProtocol-compatible
-service definitions. Status: **draft v0.1 (2026-11-09), pre-implementation**.
+service definitions. Status: **implemented through W3 (0.3.x)**. The document started as the
+pre-implementation draft of 2026-11-09; parts that are still only designed (C++ wrappers,
+uProtocol adapter, shared-memory path, secpol generation) are marked "not implemented".
 
 Decisions referenced as ADR-nnn live in [DECISIONS.md](DECISIONS.md). Unverified platform
 assumptions are tagged `VERIFY(qnx8)` / `VERIFY(up)` and tracked in [VERIFY.md](VERIFY.md).
@@ -12,7 +14,7 @@ Design answers fixed on 2026-11-09 (Q1–Q6):
 |---|----------|----------|
 | Q1 | Wire framing | Two-IOV send (header IOV + user POD struct IOV); server receives into one preallocated buffer |
 | Q2 | Call timeouts | Hard per-call timeout via `TimerTimeout(_NTO_TIMEOUT_SEND\|_NTO_TIMEOUT_REPLY)`; server sees `_PULSE_CODE_UNBLOCK` |
-| Q3 | Client callback thread | No hidden threads. `qmp_client_poll()`/`qmp_client_run()` on the application's thread |
+| Q3 | Client callback thread | No hidden threads. `qmp_client_poll()` on the application's thread |
 | Q4 | HELLO | Implicit inside `qmp_client_connect()`; `server_generation` cached in the client |
 | Q5 | up-spec pin | Latest **stable** tag `v1.5.8` (commit `cab8338`); see ADR-005 |
 | Q6 | Server threading | N identical workers (default 4) RECEIVE-blocked on one channel; deferred requests in a fixed caller-provided pool |
@@ -58,7 +60,7 @@ Layering inside one process, top to bottom. Each layer only calls the one below 
 | Layer | Language | Depends on | Notes |
 |-------|----------|-----------|-------|
 | user code | C or C++ | generated bindings | handlers run on libqmp worker threads at inherited priority |
-| `joint.qmp.hpp` | C++17 header-only | `joint.qmp.h` | wraps the **same** structs; no copies |
+| `joint.qmp.hpp` (not implemented) | C++17 header-only | `joint.qmp.h` | wraps the **same** structs; no copies |
 | `joint.qmp.h/.c` | C11 | `include/qmp/*.h` | ids, POD structs, stubs, dispatch table, reflection blob |
 | libqmp core | C11 | libc only | header codec, dispatch, subscription registry, deferred pool, versioning, errors |
 | libqmp transport | C11 | QNX libc (`<sys/neutrino.h>`, `<sys/dispatch.h>`) | one of: qnx, uds (bench/host tests only, **no priority inheritance**, ADR-004), fake (tests) |
@@ -152,8 +154,9 @@ Notation: `──►` MsgSend/MsgSendv (blocking), `◄──` MsgReply/MsgError
 ```
 
 Major mismatch: server `MsgError(rcvid, ENOTSUP)`; client returns `ENOTSUP`, no retry.
-The client's private notification channel (`_NTO_CHF_COID_DISCONNECT`) is created in
-`qmp_client_init()`, before connect, so server-death pulses are never missed.
+The client's private notification channel (`_NTO_CHF_COID_DISCONNECT`) is created by the first
+`qmp_client_subscribe()`. A client without subscriptions has no such channel and learns that
+its server died from the next call, which fails with `ESRCH`.
 
 ### 3.2 Sync method call
 
@@ -168,8 +171,10 @@ The client's private notification channel (`_NTO_CHF_COID_DISCONNECT`) is create
  returns EOK, *status = st                                T2 back to 10, MsgReceivev
 ```
 
-Only two kernel calls per round trip on the hot path (MsgSendv / MsgReplyv) plus `TimerTimeout`
-when a timeout is armed. No heap, no copies beyond the kernel's.
+The message itself costs two kernel calls per round trip (MsgSendv / MsgReplyv), plus
+`TimerTimeout` when a timeout is armed. Around the handler the server also calls `MsgInfo`
+once (the unblock check of §3.3) and takes two short internal mutexes. No heap, no copies
+beyond the kernel's.
 
 ### 3.3 Deferred reply with client timeout (Q2, Q6)
 
@@ -195,8 +200,10 @@ when a timeout is armed. No heap, no copies beyond the kernel's.
 
 Rules: the `qmp_req_t*` stays valid until replied, cancelled, or client disconnect. The deferred
 pool is caller-provided (`qmp_req_t slots[8]`); when full the server replies `MsgError(EAGAIN)`
-(UCode `RESOURCE_EXHAUSTED` reported by client). Slot reuse is guarded by a generation counter in
-`qmp_req_t` so a stale pointer from a cancelled request cannot reply to a newer request.
+(UCode `RESOURCE_EXHAUSTED` reported by client). There is no generation counter in `qmp_req_t`:
+once a request was replied or `on_cancel` returned, its pointer is dead, and using it after the
+slot was handed to a newer request is undefined, like a double free. The application drops
+the pointer in `on_cancel`.
 
 **Timeout and cancellation contract** (applies to parked *and* running requests):
 
@@ -312,18 +319,19 @@ Deferred `MsgReply` to a dead client fails with `ESRCH`/`EBADF`; the runtime tre
  client (poll loop)                            K                       server (restarts, generation 8)
                                                │ server dies → all its channels destroyed
  ◄~~~ _PULSE_CODE_COIDDEATH{coid} on chid_c ─── │ (channel created with _NTO_CHF_COID_DISCONNECT)
- qmp_client_poll: mark DISCONNECTED, on_state(ctx, QMP_DISCONNECTED)
+ qmp_client_poll: marks the client disconnected, returns ESRCH
  any in-flight MsgSendv returns ESRCH/EBADF → generated call returns ESRCH (UCode UNAVAILABLE)
- backoff 10ms,20ms,...,max 1s (configurable):
+ application calls qmp_client_reconnect(): backoff 10ms,20ms,...,max 1s (configurable):
    name_open fails ENOENT → retry                                      name_attach("qmp/0101-0000/v1")
    name_open ok → HELLO → reply {gen=8}  ──────────────────────────────►
-   gen changed (7→8): on_state(ctx, QMP_RECONNECTED_NEW_GENERATION)
+   qmp_client_server_generation() now returns 8 (it was 7): the server restarted
    for each sub: MsgRegisterEvent again (new coid), SUBSCRIBE again
-   client pulls once to refresh LATEST state (seq resets; cb called with current sample)
+   each cursor starts at the new server's current sequence: only later updates are delivered
 ```
 
-Reconnect happens inside `qmp_client_poll()` (or `qmp_client_reconnect()` explicitly for
-poll-less sync-only clients) — never on a hidden thread (Q3).
+Reconnect is an explicit call, `qmp_client_reconnect()`, on the application's thread — never
+inside `qmp_client_poll()` and never on a hidden thread (Q3). There is no state callback: the
+application sees `ESRCH` and compares `qmp_client_server_generation()` before and after.
 
 ### 3.8 uProtocol REQUEST/RESPONSE through the adapter (stretch, ADR-005)
 
@@ -367,7 +375,8 @@ the C ABI and a running service — no generated code, no side file, no registry
   passes through the per-worker work buffer, so its size is independent of the interface's
   `max_msg_size` and no memory is reserved for it.
 * REFLECT is a control opcode like HELLO: it is not subject to the per-method `acl_check`
-  hook. It discloses the interface (names, ids, layouts), never data. Channel-level access
+  hook. It discloses the interface (names, ids, layouts), never data. (SUBSCRIBE and PULL
+  are control opcodes too and do carry topic data.) Channel-level access
   is still governed by secpol `channel connect` rules.
 * Tools only — it allocates nothing and takes no lock, but a control loop has no reason to
   call it.
@@ -391,6 +400,13 @@ the C ABI and a running service — no generated code, no side file, no registry
 ## 4. Generated API sketches — `demo.joint.v1.Joint`
 
 ### 4.1 C header `joint.qmp.h` (excerpt)
+
+This is the original sketch. The generated header is the reference
+(`codegen/tests/golden/joint/joint.qmp.h`); it differs in these points: there is no
+`qmp_client_run()` and unsubscribing is `<svc>_unsubscribe_<Topic>()`; topic callbacks also
+receive a `dropped` count and subscriptions use a generated `<Topic>_sub_t`; `register` takes
+the instance id; `on_cancel` and `on_client_gone` are set in `qmp_server_cfg_t`, not in the ops
+table (ADR-009); deferred replies go through `qmp_req_reply()`.
 
 ```c
 /* SPDX-License-Identifier: Apache-2.0 */
@@ -499,11 +515,14 @@ extern const size_t        demo_joint_v1_Joint_reflect_json_len;
 ```
 
 Core types from `include/qmp/`: `qmp_client_t`, `qmp_server_t`, `qmp_sub_t`, `qmp_req_t` are
-opaque fixed-size storage (`QMP_CLIENT_STORAGE_SIZE` etc. with `_Static_assert` against the
-private layout). `qmp_server_cfg_t { int nthreads /*default 4*/; int base_prio /*0 = inherit
-caller*/; qmp_req_t *deferred_pool; size_t deferred_count; void *rxbuf; size_t rxbuf_size; }`.
+opaque fixed-size storage with `_Static_assert` against the private layout. The server
+configuration is `qmp_server_cfg_t` in `<qmp/qmp_server.h>`: transport, `nthreads` (default 4),
+listen flags, the work buffer, the deferred pool, the `acl_check`, `on_cancel` and
+`on_client_gone` callbacks and the topic storage.
 
-### 4.2 C++ wrapper `joint.qmp.hpp` (excerpt)
+### 4.2 C++ wrapper `joint.qmp.hpp` (excerpt) — not implemented
+
+Design only: the generator does not emit `*.qmp.hpp` and `include/qmp/cpp/` does not exist.
 
 ```cpp
 // SPDX-License-Identifier: Apache-2.0  — header-only, C++17, no exceptions, no RTTI, no heap
@@ -589,8 +608,8 @@ move-only RAII owner of a `qmp_sub_t` that unsubscribes in its destructor.
   Size N so that the highest-priority callers always find a worker in `MsgReceivev` (at
   least one more worker than the number of lower-priority callers that can be in a handler
   at once), and keep handlers short or defer them.
-* Base priority: all workers start at `cfg.base_prio` (default: priority of the caller of
-  `qmp_server_run`). While a worker holds a received message its priority is the client's,
+* Base priority: all workers start at the priority of the thread that calls
+  `qmp_server_run` (there is no configuration field for it). While a worker holds a received message its priority is the client's,
   higher or lower, and it keeps that priority after the reply until its next receive
   (V-QNX-011); only one-way handlers are put back to the base priority by the runtime.
 * Never hold a mutex across `MsgReplyv`, `MsgDeliverEvent`, `MsgSendv`. The subscription
@@ -617,7 +636,8 @@ ISR pulse delivered to the service's own worker pool:
      control is REPLY-blocked; its priority is "lent" to nobody — the user's motor thread
      that will complete the request should run ≥ 30. qmp cannot do this for you; DESIGN RULE:
      a deferred handler must hand off to a thread whose priority ≥ the highest caller it serves,
-     or use qmp_req_get_priority(req) to boost explicitly (pthread_setschedprio) and restore after reply.
+     or read the caller's priority with qmp_req_get_info(req, &info) (info.priority), boost
+     explicitly (pthread_setschedprio) and restore after the reply.
  t1  motor pulse → T4 @ pulse priority; user completes with Joint_SetTarget_reply(req,…)
 ```
 
@@ -680,8 +700,9 @@ translating a `UStatus` back:
 | `ENOTSUP`, `EPROTO` | `FAILED_PRECONDITION` 9 | major version mismatch at HELLO |
 | `ESRCH`, `EBADF`, `ECONNRESET`, `ENOTCONN` | `UNAVAILABLE` 14 | server died / connection gone (client will reconnect) |
 | `ENOSYS` | `UNIMPLEMENTED` 12 | `_IO_*` message, method without handler |
-| `EIO` | `DATA_LOSS` 15 | QUEUE overflow dropped samples (reported on PULL) |
-| `EFAULT`, other | `INTERNAL` 13 / `UNKNOWN` 2 | runtime bug / unmapped |
+| any other errno | `UNKNOWN` 2 | unmapped (`DATA_LOSS` 15 and `INTERNAL` 13 map back to `EIO`) |
+
+QUEUE overflow is not an error: every PULL reply and topic callback carries a `dropped` count.
 
 The reverse direction (UCode → errno) is only used by the adapter and uses the first errno in
 each row. `UNAUTHENTICATED` (16) maps to `EACCES` on the way in.

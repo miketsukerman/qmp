@@ -24,7 +24,7 @@ Raspberry Pi 5 running QNX SDP 8.0.
 | **Calls are kernel message passes** | A call is one `MsgSendv`; the handler runs on a server thread that the kernel has raised to the caller's priority. Timeouts, cancellation of a running handler, client death and server death with reconnect are handled by the runtime and tested on the board. |
 | **Topics without server-to-client sends** | The server never blocks on a subscriber: it delivers a registered pulse and the subscriber pulls the sample (`LATEST` or a bounded `QUEUE`), with every lost update counted. |
 | **A tool that needs no generated code** | `qmpctl list`, `describe`, `call` and `subscribe` work against any running service, because each service serves its own description. |
-| **Evidence, not assumptions** | 48 statements about QNX 8.0 behaviour are tracked in [docs/VERIFY.md](docs/VERIFY.md); a probe program and 23 two-process scenarios check them on the Pi. Three assumptions about the kernel turned out to be wrong and the design was corrected. |
+| **Evidence, not assumptions** | 48 statements about QNX 8.0 behaviour are tracked in [docs/VERIFY.md](docs/VERIFY.md), each with its status; a probe program and 23 two-process scenarios check them on the Pi. Three assumptions about the kernel turned out to be wrong and the design was corrected. |
 
 ## See it run on a Raspberry Pi 5
 

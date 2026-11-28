@@ -580,8 +580,19 @@ move-only RAII owner of a `qmp_sub_t` that unsubscribes in its destructor.
   capped at the number of CPUs ×2. Default 4. Rationale: a worker blocked inside a handler
   cannot receive; the pulse thread guarantees cancellation, but messages still need a free
   worker.
+* **Inheritance needs a free worker.** The kernel raises a worker to its caller's priority
+  when the worker *receives* the message. A worker that is busy with a low-priority request
+  is not raised when higher-priority callers queue up behind it (measured on QNX 8.0,
+  V-QNX-010: a worker serving a priority-8 caller stayed at 8 with callers at 20 and 30
+  SEND-blocked; they were then served highest first). With every worker busy, a
+  high-priority caller therefore waits for a handler running at someone else's priority.
+  Size N so that the highest-priority callers always find a worker in `MsgReceivev` (at
+  least one more worker than the number of lower-priority callers that can be in a handler
+  at once), and keep handlers short or defer them.
 * Base priority: all workers start at `cfg.base_prio` (default: priority of the caller of
-  `qmp_server_run`). While a worker holds a received message its priority is the client's.
+  `qmp_server_run`). While a worker holds a received message its priority is the client's,
+  higher or lower, and it keeps that priority after the reply until its next receive
+  (V-QNX-011); only one-way handlers are put back to the base priority by the runtime.
 * Never hold a mutex across `MsgReplyv`, `MsgDeliverEvent`, `MsgSendv`. The subscription
   registry uses a short critical section to snapshot `(rcvid, event)` pairs, then delivers.
 
@@ -593,7 +604,7 @@ Server `joint_service` base priority 10, N = 4. Clients: `logger` (prio 8), `hmi
 ```
  t0  logger  MsgSend GetState   → T1 inherits 8,  handler runs  @8
  t1  control MsgSend SetTarget  → T2 inherits 30 and PREEMPTS T1 (T1 is @8)      ← no inversion
- t2  T2 replies (MsgReplyv), drops to 10, blocks in MsgReceivev
+ t2  T2 replies (MsgReplyv) and blocks in MsgReceivev (it keeps 30 until its next receive)
  t3  hmi     MsgSend GetState   → T3 inherits 20, preempts T1 (@8)
  t4  T3 replies; T1 resumes @8 and finishes logger's request
 ```
@@ -616,9 +627,11 @@ it (deferred vs sync under a CPU-hog at prio 15).
 ### 5.3 Client
 
 * Sync calls run on the caller's thread at the caller's priority; the server inherits it.
-* Notification pulses carry the priority given in the sigevent; qmp uses
-  `SIGEV_PULSE_PRIO_INHERIT` by default so a high-priority publisher wakes the subscriber
-  promptly, and the subscriber's pull runs at the poller's own priority.
+* Notification pulses are registered with `SIGEV_PULSE_PRIO_INHERIT`. On QNX 8.0 that
+  leaves the receiving thread at its own priority: the publisher's priority does not reach
+  the subscriber (V-QNX-009). Delivery, the pull and the callback all run at the priority
+  of the thread that calls `qmp_client_poll()`, so a subscriber that needs prompt updates
+  polls from a thread of the priority it wants.
 * No hidden threads (Q3): `qmp_client_poll()` is the only place callbacks and reconnects happen.
 
 ### 5.4 Adapter preserving UPriority

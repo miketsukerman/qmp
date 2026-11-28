@@ -243,8 +243,8 @@ static void fill_req(qmp_req_impl_t *req, qmp_server_impl_t *s, const qmp_rcv_in
     req->h = *h;
     req->out_size = out_size;
     req->pooled = pooled;
-    req->_pad0[0] = 0;
-    req->_pad0[1] = 0;
+    req->handler_returned = 0;
+    req->_pad0 = 0;
 }
 
 /* Record the worker's in-flight slot before the handler runs. pool_mu guards the slot. */
@@ -360,7 +360,9 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
         /* An unblock pulse may have arrived before the slot existed (dropped as no-match):
          * ask the transport whether this client is still waiting to be unblocked. */
         if (s->tr->unblock_req != NULL && s->tr->unblock_req(&s->ep, info->rcvid) == 1) {
-            (void)infl_clear(s, infl);
+            /* The pulse thread may have claimed the slot in the meantime and sent the
+             * error reply already: whoever claims the slot is the only one that replies. */
+            int already = infl_clear(s, infl);
             if (pooled) {
                 pool_set_state(s, req, QMP_REQ_FREE);
             }
@@ -368,7 +370,9 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
                 qmp_log("rcvid=%lld: unblock requested before the handler ran; cancelled",
                         (long long)info->rcvid);
             }
-            send_error(s, info->rcvid, ECANCELED);
+            if (!already) {
+                send_error(s, info->rcvid, ECANCELED);
+            }
             return;
         }
     }
@@ -382,9 +386,36 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
     /* Only the owning worker ever replies through its slot: once the slot has left
      * RUNNING here, a late unblock pulse finds no match and is dropped. If a canceller
      * claimed it first (CANCELED), the error reply already went out — or the client
-     * disconnected — so the handler's result is discarded and there is no second reply. */
-    int cancelled = infl != NULL ? infl_clear(s, infl) : 0;
+     * disconnected — so the handler's result is discarded and there is no second reply.
+     *
+     * Leaving the in-flight slot and parking the request happen in ONE critical section:
+     * an unblock pulse therefore always finds the request, either still RUNNING in the
+     * in-flight slot or already PARKED in the pool, and is never dropped in between (the
+     * kernel sends that pulse only once). */
+    (void)pthread_mutex_lock(&s->pool_mu);
+    int cancelled = 0;
+    if (infl != NULL) {
+        cancelled = infl->state == QMP_INFL_CANCELED;
+        infl->state = QMP_INFL_IDLE;
+        infl->rcvid = 0;
+        infl->scoid = 0;
+    }
     req->infl = NULL;
+    uint8_t st = req->state;
+    if (rc == QMP_DEFERRED && pooled) {
+        if (st == QMP_REQ_ACTIVE) {
+            /* Cancelled while running: never park a dead request. */
+            req->state = cancelled ? QMP_REQ_CLAIMED : QMP_REQ_PARKED;
+        } else if (st == QMP_REQ_DONE) {
+            req->state = QMP_REQ_FREE; /* qmp_req_reply() already ran inside the handler */
+        } else if (st == QMP_REQ_CLAIMED) {
+            /* qmp_req_reply() is running on another thread right now, between claiming
+             * the slot and marking it: tell it that nobody will come back for the slot,
+             * so it frees the slot itself instead of leaving it DONE for ever. */
+            req->handler_returned = 1;
+        }
+    }
+    (void)pthread_mutex_unlock(&s->pool_mu);
     if (rc == QMP_DEFERRED) {
         if (!pooled) {
             if (!cancelled) {
@@ -392,15 +423,6 @@ void qmp_server_dispatch(qmp_server_impl_t *s, const qmp_rcv_info_t *info, uint8
             }
             return;
         }
-        (void)pthread_mutex_lock(&s->pool_mu);
-        uint8_t st = req->state;
-        if (st == QMP_REQ_ACTIVE) {
-            /* Cancelled while running: never park a dead request. */
-            req->state = cancelled ? QMP_REQ_CLAIMED : QMP_REQ_PARKED;
-        } else if (st == QMP_REQ_DONE) {
-            req->state = QMP_REQ_FREE; /* qmp_req_reply() already ran inside the handler */
-        }
-        (void)pthread_mutex_unlock(&s->pool_mu);
         if (st == QMP_REQ_ACTIVE && cancelled) {
             if (s->on_cancel != NULL) {
                 s->on_cancel(s->ctx, (qmp_req_t *)(void *)req); /* app drops its pointer */
@@ -465,8 +487,11 @@ int qmp_req_reply(qmp_req_t *req, const void *payload, size_t payload_len, int32
     qmp_hdr_t rh;
     qmp_hdr_init_reply(&rh, &r->h, status, (uint32_t)payload_len);
     send_reply(s, r->rcvid, &rh, payload, payload_len); /* dead client == delivered */
-    /* ACTIVE: the handler still holds the slot; dispatch frees it after QMP_DEFERRED. */
-    pool_set_state(s, r, prev == QMP_REQ_ACTIVE ? QMP_REQ_DONE : QMP_REQ_FREE);
+    /* ACTIVE: the handler still holds the slot and dispatch frees it after QMP_DEFERRED,
+     * unless the handler returned while this reply was in flight (handler_returned). */
+    (void)pthread_mutex_lock(&s->pool_mu);
+    r->state = (prev == QMP_REQ_ACTIVE && r->handler_returned == 0) ? QMP_REQ_DONE : QMP_REQ_FREE;
+    (void)pthread_mutex_unlock(&s->pool_mu);
     return EOK;
 }
 

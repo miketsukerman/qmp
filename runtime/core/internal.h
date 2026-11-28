@@ -99,7 +99,10 @@ typedef struct qmp_req_impl {
     uint32_t out_size; /* method's reply payload size                        */
     uint8_t state;     /* enum qmp_req_state; pool slots guarded by pool_mu  */
     uint8_t pooled;    /* 0: stack storage inside dispatch (sync only)       */
-    uint8_t _pad0[2];
+    /* The handler returned QMP_DEFERRED while qmp_req_reply() on another thread held the
+     * slot CLAIMED: that reply frees the slot itself. Guarded by pool_mu. */
+    uint8_t handler_returned;
+    uint8_t _pad0;
 } qmp_req_impl_t;
 QMP_STATIC_ASSERT(sizeof(qmp_req_impl_t) <= sizeof(qmp_req_t), "qmp_req_t too small");
 QMP_STATIC_ASSERT(QMP_ALIGNOF(qmp_req_impl_t) <= QMP_ALIGNOF(qmp_req_t), "qmp_req_t align");

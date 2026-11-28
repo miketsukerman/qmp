@@ -84,6 +84,24 @@ QMP_STATIC_ASSERT(sizeof(qnx_conn_impl_t) <= sizeof(qmp_conn_t), "conn storage")
 
 /* ---- client --------------------------------------------------------------- */
 
+/* Throw away what is queued on the private notification channel. Called on a fresh
+ * connection: pulses left from the previous session (topic notifications, and the
+ * COIDDEATH of a server whose death was noticed through a failed call) must not be taken
+ * for events of the new one, whose coid may well be the same number. A NULL timeout
+ * length makes the receive return at once when nothing is queued. */
+static void qnx_notify_drain(const qnx_conn_impl_t *c) {
+    if (c->notify_chid <= 0) {
+        return;
+    }
+    for (int i = 0; i < 4096; i++) {
+        struct _pulse p;
+        (void)TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_RECEIVE, NULL, NULL, NULL);
+        if (MsgReceivePulse(c->notify_chid, &p, sizeof(p), NULL) == -1) {
+            return;
+        }
+    }
+}
+
 static int qnx_connect(qmp_conn_t *conn, const char *path) {
     qnx_conn_impl_t *c = (qnx_conn_impl_t *)(void *)conn;
     /* VERIFY(qnx8): V-QNX-002 — hierarchical names with slashes resolve via name_open. */
@@ -92,6 +110,7 @@ static int qnx_connect(qmp_conn_t *conn, const char *path) {
         return errno != 0 ? errno : ENOENT;
     }
     c->coid = coid;
+    qnx_notify_drain(c);
     return EOK;
 }
 
@@ -262,8 +281,16 @@ static int qnx_handle_pulse(qnx_ep_impl_t *e, const struct _pulse *p, qmp_rcv_in
         info->scoid = p->scoid;
         return EOK;
     case QMP_QNX_PULSE_STOP:
+        /* Any process that may connect can send a pulse with this code. The pulse only
+         * wakes receivers up; the decision to stop is the flag that qnx_unblock() set in
+         * this process. Without it the pulse is somebody else's and is ignored. */
+        if (e->stop == 0) {
+            info->kind = QMP_RCV_PULSE;
+            info->pulse_code = p->code;
+            info->scoid = p->scoid;
+            return EOK;
+        }
         /* Daisy-chain so every receiver (workers and pulse thread) wakes up. */
-        e->stop = 1;
         (void)MsgSendPulse(e->self_coid, -1, QMP_QNX_PULSE_STOP, 0);
         return ECANCELED;
     default:
@@ -485,7 +512,12 @@ static int qnx_notify_wait(qmp_conn_t *conn, uint64_t timeout_ns, int64_t *value
             *value = (int64_t)(intptr_t)p.value.sival_ptr;
             return EOK;
         case _PULSE_CODE_COIDDEATH:
-            return ESRCH; /* a connection of ours died; the core re-handshakes */
+            /* The kernel reports the death of ANY connection of this process here, with
+             * the coid as the pulse value (V-QNX-005). Only our server's counts. */
+            if (p.value.sival_int != c->coid) {
+                continue;
+            }
+            return ESRCH; /* our server died; the core re-handshakes */
         default:
             continue; /* unrelated pulse on the private channel: ignore */
         }

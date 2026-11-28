@@ -15,7 +15,7 @@
 
 #define QMP_VERSION_MAJOR 0
 #define QMP_VERSION_MINOR 3
-#define QMP_VERSION_PATCH 8
+#define QMP_VERSION_PATCH 9
 
 #define QMP_VERSION_STR_(x)       #x
 #define QMP_VERSION_STR(x)        QMP_VERSION_STR_(x)

@@ -13,6 +13,34 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-11-28
+
+Wire version 1 · reflection version 1
+
+Fixes from an independent review of the runtime.
+
+### Fixed
+- A deferred-reply slot was lost for good when `qmp_req_reply()` ran on another thread
+  while the handler was returning `QMP_DEFERRED`. After as many such calls as the pool has
+  slots, every deferred call failed with `EAGAIN`. The reply now frees the slot itself in
+  that case.
+- An unblock pulse that arrived between a handler returning `QMP_DEFERRED` and its request
+  being parked was dropped, which left the client blocked until the application replied.
+  Leaving the in-flight slot and parking are now one step.
+- A request cancelled before its handler ran could be answered with `ECANCELED` twice, by
+  the worker and by the pulse thread. The second answer could hit the same client's next
+  request.
+- QNX transport: a server no longer stops when another process sends it a pulse with the
+  internal stop code. The pulse only takes effect after `qmp_server_stop()` was called in
+  the server's own process.
+- QNX transport: `qmp_client_poll()` reported the server as gone whenever any connection of
+  the process died. It now reacts only to its own server's connection, and a fresh
+  connection discards pulses left over from the previous session.
+- README: the round-trip latency figures are removed until the licence terms for publishing
+  benchmarks are checked.
+- DESIGN, DECISIONS, RISKS, SCAFFOLD and VERIFY no longer describe functions and behaviour
+  that do not exist.
+
 ## [0.3.8] - 2026-11-28
 
 Wire version 1 · reflection version 1

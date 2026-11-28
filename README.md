@@ -120,7 +120,7 @@ client, so topics use notify-then-pull over registered events. The same core
 also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
 only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Status (0.3.8, W4)
+## Status (0.3.9, W4)
 
 | Area | State |
 |------|-------|
@@ -129,7 +129,7 @@ only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 | transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events); `uds` (`AF_UNIX`/`SOCK_SEQPACKET`, host default, also built on QNX) for benchmarks and host integration tests only — **no priority inheritance** (ADR-004) |
 | tools | `qmpctl list \| describe \| call \| subscribe`: C++17, links only the C ABI, no generated code — every generated service serves its own reflection JSON (`QMP_OP_REFLECT`, ADR-010) and qmpctl converts JSON ⇄ fixed-layout payloads from it ([Codelab 04](docs/codelab/04-inspect-with-qmpctl.md)) |
 | examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
-| tests | 131 GoogleTest cases: 97 in `qmp_core_tests` (22 over UDS, including two-process kill -9 scenarios) and 34 in `qmpctl_tests` (JSON codec checked against generated structs; commands run against live servers) + `joint_server --selftest` (host) + 59 codegen pytest cases, asan/ubsan/tsan clean |
+| tests | 132 GoogleTest cases: 98 in `qmp_core_tests` (22 over UDS, including two-process kill -9 scenarios) and 34 in `qmpctl_tests` (JSON codec checked against generated structs; commands run against live servers) + `joint_server --selftest` (host) + 59 codegen pytest cases, asan/ubsan/tsan clean |
 | on target | RPi5, build `5882b8d296c8` (2026-11-28, version 0.3.7; build `41d4bc624bb6` was built from a fresh clone by the steps in this README): 97/97 `qmp_core_tests` cases (22 over UDS, and 97/97 built with UBSan at build `6a20d54a805b`), `qmp_qnx_probe` passes all of its kernel checks, 23/23 `scripts/target-smoke.sh` scenarios (four of them through `qmpctl`), including the one-way `Stop` whose handler runs at the server's own priority 10 for a priority-30 caller; Build `45191631ff46` (version 0.3.3): `scripts/target-demo.sh` over `qnx` and `uds`: 500 updates per second with none dropped, `kill -9` of the server, automatic reconnect and resubscribe, 500 per second again. Build `3527c7ed29fb` (version 0.3.1): `qmpctl_tests` 33/33 runnable on the native transport. Build `9598188d39ac` (version 0.3.0): `qmpctl_tests` 34/34 over UDS. Wire compatibility with the last pre-versioning build `3cd249234123` checked in both directions over the native transport (old server with new `qmpctl` and client, new server with old `qmpctl` and client). Build `a4230da3880c`: joint demo over `--transport uds` and `qnx`; results recorded in [docs/VERIFY.md](docs/VERIFY.md). Latency figures are not published here until the licence terms for publishing benchmarks have been checked |
 | bench | `bench/prio_inversion.c`: a priority-30 caller, a priority-10 server and a priority-15 CPU hog on one core, over native message passing, native without inheritance and UDS; `bench/run.sh` runs it on the board, `bench/plot.py` makes the table and chart |
 | not done | secpol generation from `qmp.allow_types`, the uProtocol `UTransport` adapter, C++17 wrappers and a shared-memory bulk path are designed in DESIGN.md but not implemented |
@@ -144,7 +144,7 @@ and patch are in [ADR-011](docs/DECISIONS.md).
 
 | Number | Now | Answers | Where |
 |--------|-----|---------|-------|
-| product version | 0.3.8 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
+| product version | 0.3.9 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
 | wire version | 1 | can these two processes talk? Equal means yes | `QMP_WIRE_VERSION`, exchanged in HELLO |
 | reflection version | 1 | can this `qmpctl` read that service's description? | `qmp_reflect_version` in the reflection JSON |
 | service version | per service | is this client compatible with that interface? | `(uprotocol.service_version_*)` in the `.proto` |
@@ -188,7 +188,7 @@ ctest --test-dir build/host-debug --output-on-failure
 Expected tail of the `ctest` output:
 
 ```
-100% tests passed, 0 tests failed out of 133
+100% tests passed, 0 tests failed out of 134
 ```
 
 Generated bindings for the example service land in `build/host-debug/gen/joint/`

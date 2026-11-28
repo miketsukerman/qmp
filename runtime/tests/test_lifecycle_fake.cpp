@@ -378,4 +378,132 @@ TEST_F(Lifecycle, ReconnectWhileConnectedIsEISCONN) {
     qmp_client_close(&c);
 }
 
+// ---- a reply from another thread that overlaps the handler's return ---------------------
+// The handler hands its request to a completer thread and returns QMP_DEFERRED while that
+// thread is still inside qmp_req_reply() (the transport's reply is slowed down to hold it
+// there). The slot must be free afterwards: before 0.3.9 it stayed DONE for ever, so a
+// pool of two was used up after two fully answered calls and every later one got EAGAIN.
+
+// State is polled, not waited for on a condition variable: std::condition_variable::wait
+// recurses without end in the libstdc++ of SDP 8.0 when linked the way these tests are.
+struct Overlap {
+    const qmp_transport_t *real = nullptr;
+    std::mutex mu;
+    qmp_req_t *req = nullptr; // handed to the completer
+    bool in_reply = false;    // the completer is inside the transport's reply()
+    bool stop = false;
+};
+Overlap g_overlap;
+
+int overlap_slow_reply(qmp_endpoint_t *ep, int64_t rcvid, const qmp_iov_t *iov, int parts) {
+    bool mine = false;
+    {
+        std::lock_guard<std::mutex> lk(g_overlap.mu);
+        // Only the deferred reply sets the request aside first; HELLO and others pass through.
+        mine = g_overlap.req != nullptr;
+        if (mine) {
+            g_overlap.req = nullptr;
+            g_overlap.in_reply = true;
+        }
+    }
+    if (mine) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30)); // the handler returns now
+    }
+    return g_overlap.real->reply(ep, rcvid, iov, parts);
+}
+
+int overlap_handler(const void *, void *, qmp_req_t *req, const void *, void *, int32_t *) {
+    {
+        std::lock_guard<std::mutex> lk(g_overlap.mu);
+        g_overlap.in_reply = false;
+        g_overlap.req = req;
+    }
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lk(g_overlap.mu);
+            if (g_overlap.in_reply) {
+                return QMP_DEFERRED;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+TEST(DeferredOverlap, ReplyDuringHandlerReturnFreesTheSlot) {
+    static const qmp_method_desc_t methods[] = {
+        {1, 0, 0, sizeof(uint64_t), 0, nullptr, overlap_handler, "M"}};
+    static const qmp_service_desc_t desc = {
+        0x0E77, 1, 0, QMP_HDR_SIZE + 40, "test.Overlap", methods, 1, nullptr, 0, nullptr, 0};
+    g_overlap.real = qmp_transport_fake();
+    static qmp_transport_t tr;
+    tr = *g_overlap.real;
+    tr.reply = overlap_slow_reply;
+
+    static uint64_t workbuf[QMP_SERVER_WORKBUF_SIZE(64, 2) / 8];
+    static qmp_req_t pool[2];
+    static qmp_server_t server;
+    qmp_server_cfg_t cfg{};
+    cfg.transport = &tr;
+    cfg.nthreads = 2;
+    cfg.workbuf = workbuf;
+    cfg.workbuf_size = sizeof(workbuf);
+    cfg.deferred_pool = pool;
+    cfg.deferred_count = 2;
+    int dummy_ops = 0;
+    ASSERT_EQ(qmp_server_init(&server, &cfg), EOK);
+    ASSERT_EQ(qmp_server_register(&server, &desc, 0, &dummy_ops, nullptr), EOK);
+    std::thread runner([] { EXPECT_EQ(qmp_server_run(&server), EOK); });
+    std::thread completer([] {
+        for (;;) {
+            qmp_req_t *req = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(g_overlap.mu);
+                if (g_overlap.stop) {
+                    return;
+                }
+                req = g_overlap.req; // cleared by overlap_slow_reply once the reply is in flight
+            }
+            if (req == nullptr) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            uint64_t v = 42;
+            EXPECT_EQ(qmp_req_reply(req, &v, sizeof(v), 0), EOK);
+        }
+    });
+
+    qmp_client_t c;
+    qmp_client_cfg_t ccfg{};
+    ccfg.transport = &tr;
+    ASSERT_EQ(qmp_client_init(&c, &ccfg), EOK);
+    ASSERT_EQ(qmp_client_connect(&c, 0x0E77, 0, 1, 0), EOK);
+    for (int i = 0; i < 6; i++) { // three times the pool
+        uint64_t rep = 0;
+        int32_t st = -1;
+        ASSERT_EQ(qmp_client_call(&c, 1, nullptr, 0, &rep, sizeof(rep), &st, nullptr), EOK)
+            << "call " << i;
+        EXPECT_EQ(rep, 42U);
+        // The slot is released by the replier just after the client was woken.
+        auto *si = reinterpret_cast<qmp_server_impl_t *>(&server);
+        for (int spin = 0; spin < 2000; spin++) {
+            pthread_mutex_lock(&si->pool_mu);
+            bool all_free = si->pool[0].state == QMP_REQ_FREE && si->pool[1].state == QMP_REQ_FREE;
+            pthread_mutex_unlock(&si->pool_mu);
+            if (all_free) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    qmp_client_close(&c);
+    {
+        std::lock_guard<std::mutex> lk(g_overlap.mu);
+        g_overlap.stop = true;
+    }
+    completer.join();
+    qmp_server_stop(&server);
+    runner.join();
+    qmp_server_close(&server);
+}
+
 } // namespace

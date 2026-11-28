@@ -6,3 +6,12 @@ type joint_ctrl_t;
 type joint_other_t;
 
 allow joint_ctrl_t joint_svc_t:channel connect;
+
+# Once a policy is loaded, a process may only attach the path names the policy grants its
+# type (an untyped process gets EACCES from name_attach until the board reboots). The
+# server type is given the Joint service's name.
+allow_attach joint_svc_t /dev/name/local/qmp/0101-0000/v1;
+
+# A type needs at least one rule to be usable. This gives joint_other_t one that has nothing
+# to do with the Joint service, so it is a valid type WITHOUT the right to connect.
+allow_attach joint_other_t /dev/name/local/qmp-secpol-other;

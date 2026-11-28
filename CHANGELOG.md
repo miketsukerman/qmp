@@ -13,6 +13,17 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-28
+
+Wire version 1 · reflection version 1
+
+### Fixed
+- `scripts/target-secpol-check.sh` works on the quick-start image: it passes the policy
+  file to `on -S`, because the image has no `/proc/boot/secpol.bin` to resolve type names
+  from, and the test policy grants the server type its service name and gives the unlisted
+  type a rule of its own so that it is a valid type. The script now says that the board
+  must be rebooted afterwards.
+
 ## [0.3.7] - 2026-11-28
 
 Wire version 1 · reflection version 1

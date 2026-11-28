@@ -9,9 +9,10 @@
 #   no type         as started over SSH              reported, no expectation
 #
 # THIS CHANGES SYSTEM STATE ON THE TARGET: it needs root (passwordless sudo) and loads a
-# security policy into the running kernel. The policy defines three new types and one
-# connect rule, and it stays loaded until the board reboots. Run it on a development board
-# only. It is not part of scripts/target-smoke.sh for that reason.
+# security policy into the running kernel, where it stays until the board reboots. While
+# it is loaded, processes without a type can no longer name_attach: qmp servers started
+# the normal way fail with EACCES, so REBOOT THE BOARD AFTERWARDS. Run it on a development
+# board only. It is not part of scripts/target-smoke.sh for that reason.
 #
 # Usage: QMP_TARGET=qnxuser@192.168.1.50 scripts/target-secpol-check.sh --i-understand
 #
@@ -54,17 +55,19 @@ echo "--- policy id before: $(t 'sudo -n secpol -Q' | tr -d '\r')"
 t "sudo -n secpolpush '$QMP_TARGET_DIR/joint-secpol.bin'"
 echo "--- policy id after:  $(t 'sudo -n secpol -Q' | tr -d '\r')"
 
-t "sudo -n on -T joint_svc_t '$JSRV' --verbose > '$QMP_TARGET_DIR/secpol-srv.log' 2>&1 &"
+t "sudo -n on -S '$QMP_TARGET_DIR/joint-secpol.bin' -T joint_svc_t '$JSRV' --verbose > '$QMP_TARGET_DIR/secpol-srv.log' 2>&1 &"
 sleep 1
 
 rc=0
 echo "--- client of type joint_ctrl_t (allowed):"
-t "sudo -n on -T joint_ctrl_t '$JCLI' once" || rc=1
-echo "--- client of type joint_other_t (not allowed): expect a failed connect"
-if t "sudo -n on -T joint_other_t '$JCLI' once"; then
-    echo "MISS: the unlisted type connected"
-    rc=1
-fi
+t "sudo -n on -S '$QMP_TARGET_DIR/joint-secpol.bin' -T joint_ctrl_t '$JCLI' once" || rc=1
+echo "--- client of type joint_other_t (not allowed): expect a refused connect"
+other=$(t "sudo -n on -S '$QMP_TARGET_DIR/joint-secpol.bin' -T joint_other_t '$JCLI' once 2>&1" || true)
+echo "$other"
+case "$other" in
+*"connect to "*" failed"*) echo "ok:   the unlisted type was refused" ;;
+*) echo "MISS: expected the client to start and its connect to be refused"; rc=1 ;;
+esac
 echo "--- client without a type (as started over SSH): informational"
 t "'$JCLI' once" || true
 echo "--- server log:"

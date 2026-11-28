@@ -4,16 +4,74 @@
 
 qmp lets you describe a service in Protobuf (proto3, used as a **schema language only**),
 annotated with [Eclipse uProtocol](https://github.com/eclipse-uprotocol/up-spec) service options,
-and generates C11 bindings (plus optional header-only C++17 wrappers) whose transport is QNX
+and generates C11 bindings whose transport is QNX
 native message passing: `MsgSend`/`MsgReceive`/`MsgReply`, registered events and pulses.
 No sockets, no varint encoding on the hot path — payloads are fixed-layout PODs, so the
 synchronous semantics, priority inheritance and determinism of QNX IPC are kept and showcased.
 
-An individual entry for the QNX Global Developer Hackathon 2026.
+An individual entry for the QNX Global Developer Hackathon 2026, developed and tested on a
+Raspberry Pi 5 running QNX SDP 8.0.
 
 * Design: [docs/DESIGN.md](docs/DESIGN.md) · Decisions: [docs/DECISIONS.md](docs/DECISIONS.md)
-* Open verification items against QNX SDP 8.0 / uProtocol: [docs/VERIFY.md](docs/VERIFY.md)
-* Tutorial: [docs/codelab/](docs/codelab/) · Spikes: [docs/spikes/](docs/spikes/)
+* What was checked on the board, claim by claim: [docs/VERIFY.md](docs/VERIFY.md)
+* Tutorial in five chapters: [docs/codelab/](docs/codelab/) · Changes: [CHANGELOG.md](CHANGELOG.md)
+
+## What you get
+
+| | |
+|---|---|
+| **A service is a `.proto` file** | Methods, one-way methods and topics with uProtocol ids. `protoc-gen-qmp` turns it into C11 structs with fixed layouts, typed client stubs, a server ops table and a reflection document. No serialization step at run time. |
+| **Calls are kernel message passes** | A call is one `MsgSendv`; the handler runs on a server thread that the kernel has raised to the caller's priority. Timeouts, cancellation of a running handler, client death and server death with reconnect are handled by the runtime and tested on the board. |
+| **Topics without server-to-client sends** | The server never blocks on a subscriber: it delivers a registered pulse and the subscriber pulls the sample (`LATEST` or a bounded `QUEUE`), with every lost update counted. |
+| **A tool that needs no generated code** | `qmpctl list`, `describe`, `call` and `subscribe` work against any running service, because each service serves its own description. |
+| **Evidence, not assumptions** | 48 statements about QNX 8.0 behaviour are tracked in [docs/VERIFY.md](docs/VERIFY.md); a probe program and 23 two-process scenarios check them on the Pi. Three assumptions about the kernel turned out to be wrong and the design was corrected. |
+
+## See it run on a Raspberry Pi 5
+
+With QNX SDP 8.0 on the host and the quick-start image on the board
+([details](#qnx-target-build-manual--no-sdp-in-ci)):
+
+```sh
+source ~/qnx800/qnxsdp-env.sh
+cmake --preset qnx-aarch64le && cmake --build build/qnx-aarch64le
+export QMP_TARGET=qnxuser@<pi5-address>
+
+scripts/target-demo.sh      # 500 Hz topic stream, kill -9 of the server, automatic recovery
+scripts/target-smoke.sh     # 23 scenarios: timeouts, deaths, priorities, topics, qmpctl
+bench/run.sh                # priority inversion: native message passing against UDS
+scripts/target-run.sh tools/probe/qmp_qnx_probe   # the kernel facts qmp relies on
+```
+
+The demo prints one line per second and ends with `DEMO PASSED`:
+
+```
+monitor: t=3s rate=500 Hz dropped=0 max_gap=2009.1us connected=1 generation=3482226736
+joint_client: monitor: server gone (rc=3), reconnecting
+joint_client: monitor: qmp_client_reconnect -> 0 (No error) generation=1383038233
+monitor: t=12s rate=500 Hz dropped=0 max_gap=2042.6us connected=1 generation=1383038233
+```
+
+## Where QNX is used
+
+Everything QNX-specific lives in one file,
+[`runtime/transport/qnx/qnx_transport.c`](runtime/transport/qnx/qnx_transport.c); the core
+above it is portable C11 and also runs on the host for tests.
+
+| QNX facility | Where | What qmp uses it for |
+|---|---|---|
+| `ChannelCreate`, `dispatch_create_channel`, `name_attach` | `qnx_listen()` | One channel per service instance, published as `/dev/name/local/qmp/<service>-<instance>/v<major>`. The names are the service registry. |
+| `name_open`, `MsgSendv`, `TimerTimeout` | `qnx_connect()`, `qnx_call()` | A method call: header and payload as two IOVs, with a kernel timeout that covers both the SEND- and the REPLY-blocked state. |
+| `MsgReceive`, `MsgReplyv`, `MsgError` | `qnx_receive()`, `qnx_reply()`, `qnx_error()` | The worker loop. Transport errors travel as `MsgError`, application status in the reply header. |
+| Priority inheritance across `MsgSend` | channel created without `_NTO_CHF_FIXED_PRIORITY` | A handler runs at its caller's priority. `--fixed-priority` turns it off as the negative control for the benchmark. |
+| `_NTO_CHF_UNBLOCK`, `_PULSE_CODE_UNBLOCK`, `MsgInfo` (`_NTO_MI_UNBLOCK_REQ`), `MsgReceivePulse` | `qnx_receive_pulse()`, `qnx_unblock_req()` | Client timeouts and signals cancel the request in the server, also while every worker is busy. |
+| `_NTO_CHF_DISCONNECT`, `_PULSE_CODE_DISCONNECT`, `ConnectDetach` | `qnx_handle_pulse()` | A dead client's parked requests and subscriptions are released. |
+| `_NTO_CHF_COID_DISCONNECT`, `_PULSE_CODE_COIDDEATH` | `qnx_notify_open()`, `qnx_notify_wait()` | A client learns that its server died and reconnects. |
+| `MsgRegisterEvent`, `SIGEV_MAKE_UPDATEABLE`, `MsgDeliverEvent` | `qnx_event_register()`, `qnx_deliver()` | Topics: only the subscribed-to server may deliver the pulse, and it carries the sequence number. |
+| `ConnectClientInfo` | `qnx_fill_creds()` | Kernel-supplied pid, uid and gid for the `acl_check` hook. |
+| `on -p`, `on -C`, `pidin`, `slay` | `scripts/target-smoke.sh`, `bench/run.sh` | Priorities, CPU pinning and kernel-state capture in the target scenarios. |
+
+[`tools/probe/qnx_probe.c`](tools/probe/qnx_probe.c) exercises the same facilities without
+libqmp, to check what the kernel really does.
 
 ## Architecture
 
@@ -23,7 +81,7 @@ flowchart TB
     direction LR
     proto["joint.proto<br/>uProtocol options<br/>qmp/options.proto"]
     gen["protoc + protoc-gen-qmp<br/>(Python, Jinja2)"]
-    art["joint.qmp.h / joint.qmp.c (C11)<br/>joint.qmp.hpp (C++17, optional)<br/>joint.reflect.json"]
+    art["joint.qmp.h / joint.qmp.c (C11)<br/>joint.reflect.json"]
     proto --> gen --> art
   end
 
@@ -70,10 +128,10 @@ only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 | transports | `fake` (in-process, host tests, mirrors documented 8.0 kernel semantics); QNX native (`name_attach`, `MsgSendv`, unblock/disconnect pulses, registered events); `uds` (`AF_UNIX`/`SOCK_SEQPACKET`, host default, also built on QNX) for benchmarks and host integration tests only — **no priority inheritance** (ADR-004) |
 | tools | `qmpctl list \| describe \| call \| subscribe`: C++17, links only the C ABI, no generated code — every generated service serves its own reflection JSON (`QMP_OP_REFLECT`, ADR-010) and qmpctl converts JSON ⇄ fixed-layout payloads from it ([Codelab 04](docs/codelab/04-inspect-with-qmpctl.md)) |
 | examples | `qmp_joint_server` / `qmp_joint_client` (generated Joint bindings), `qmp_smoke` (hand-written service); two-process target scenarios in `scripts/target-smoke.sh` |
-| tests | 128 GoogleTest cases: 94 in `qmp_core_tests` (22 over UDS, including two-process kill -9 scenarios) and 34 in `qmpctl_tests` (JSON codec checked against generated structs; commands run against live servers) + `joint_server --selftest` (host) + 58 codegen pytest cases, asan/ubsan/tsan clean |
+| tests | 131 GoogleTest cases: 97 in `qmp_core_tests` (22 over UDS, including two-process kill -9 scenarios) and 34 in `qmpctl_tests` (JSON codec checked against generated structs; commands run against live servers) + `joint_server --selftest` (host) + 59 codegen pytest cases, asan/ubsan/tsan clean |
 | on target | RPi5, build `6a20d54a805b` (2026-11-28, version 0.3.4): 97/97 `qmp_core_tests` cases (22 over UDS, and 97/97 again built with UBSan), `qmp_qnx_probe` passes all of its kernel checks, 23/23 `scripts/target-smoke.sh` scenarios (four of them through `qmpctl`), including the one-way `Stop` whose handler runs at the server's own priority 10 for a priority-30 caller; Build `45191631ff46` (version 0.3.3): `scripts/target-demo.sh` over `qnx` and `uds`: 500 updates per second with none dropped, `kill -9` of the server, automatic reconnect and resubscribe, 500 per second again. Build `3527c7ed29fb` (version 0.3.1): `qmpctl_tests` 33/33 runnable on the native transport. Build `9598188d39ac` (version 0.3.0): `qmpctl_tests` 34/34 over UDS. Wire compatibility with the last pre-versioning build `3cd249234123` checked in both directions over the native transport (old server with new `qmpctl` and client, new server with old `qmpctl` and client). Build `a4230da3880c`: joint demo over `--transport uds` and `qnx`; results recorded in [docs/VERIFY.md](docs/VERIFY.md). Same-board round trip, `loop 5000` with a 5 s timeout: native median 4.0 µs / p99 5.7 µs, UDS median 57.8 µs / p99 68.5 µs (a first look, not the W4 benchmark) |
 | bench | `bench/prio_inversion.c`: a priority-30 caller, a priority-10 server and a priority-15 CPU hog on one core, over native message passing, native without inheritance and UDS; `bench/run.sh` runs it on the board, `bench/plot.py` makes the table and chart |
-| next | secpol generation, uProtocol adapter (W4, adapter is stretch); C++ wrappers in the generator (stretch) |
+| not done | secpol generation from `qmp.allow_types`, the uProtocol `UTransport` adapter, C++17 wrappers and a shared-memory bulk path are designed in DESIGN.md but not implemented |
 
 ## Versioning
 
@@ -239,6 +297,8 @@ bench/plot.py bench/results/<build id> # Markdown table on stdout, latency.svg i
 
 Each run prints one `result:` line and reports the priority the handler really ran at
 (`handler_prio_min`/`handler_prio_max`). Results land in `bench/results/`, which git ignores.
+Walkthrough, with the limits of priority inheritance that were measured on the board:
+[Codelab 05](docs/codelab/05-priority-inversion.md).
 
 Sanitizers on target: `-DQMP_SANITIZER=ubsan` (asan needs the shared runtime; no tsan on QNX —
 use the host tsan preset).

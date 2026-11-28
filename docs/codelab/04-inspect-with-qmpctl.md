@@ -226,3 +226,5 @@ qmpctl --reflect build/host-debug/gen/joint/joint.reflect.json call 0101 GetStat
 
 Options at a glance: `--transport qnx|uds|fake`, `--timeout MS` (default 2000, 0 = wait
 forever), `--reflect FILE`, `--json`, `--pretty`, `--count N`, `--duration MS`.
+
+**Next:** [Codelab 05](05-priority-inversion.md) — priority inversion: what native message passing buys you.

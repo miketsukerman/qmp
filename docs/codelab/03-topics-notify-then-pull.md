@@ -157,4 +157,4 @@ other keeps receiving), and `kill -9` the server mid-stream (the subscriber logs
 - Updates stop after a server restart → check for `qmp_client_reconnect` in your poll loop's
   `ESRCH` path (see `examples/joint_demo/joint_client.c`, `mode_subscribe`).
 
-**Next:** Codelab 04 — benchmarks: what notify-then-pull costs, measured (later milestone).
+**Next:** [Codelab 04](04-inspect-with-qmpctl.md) — inspect and exercise a running service with qmpctl.

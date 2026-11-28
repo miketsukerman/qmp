@@ -13,6 +13,18 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-11-28
+
+Wire version 1 · reflection version 1
+
+### Fixed
+- Data race in `qmp_joint_server`: the `Stop` handler wrote the stopped flag on one worker
+  while `GetState` read it on another, and the publisher shared the sequence number with
+  `SetTarget`. The demo state is now guarded by a mutex. The race made the TSan job of the
+  host workflow fail intermittently since 0.3.1.
+- `qmp_bench_prio_inversion` waits until the server and hog threads have set their
+  priority before it checks the result and starts measuring; its stop flags are atomic.
+
 ## [0.3.6] - 2026-11-28
 
 Wire version 1 · reflection version 1

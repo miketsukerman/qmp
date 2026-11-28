@@ -39,6 +39,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,9 +90,14 @@ typedef struct srv_state {
     float position_rad;
     uint64_t seq;
     int verbose;
-    volatile sig_atomic_t stopped; /* set by the one-way Stop, cleared by SetTarget */
+    int stopped; /* set by the one-way Stop, cleared by SetTarget */
+    /* Handlers run on several workers and the publisher is a thread of its own: every
+     * access to the fields above takes this lock. It is never held across a reply or a
+     * publish. */
+    pthread_mutex_t mu;
 } srv_state_t;
 
+/* Caller holds sv->mu. */
 static void fill_mode(const srv_state_t *sv, demo_joint_v1_JointState *st) {
     const char *mode = sv->stopped ? "stopped" : "hold";
     st->mode.len = (uint16_t)strlen(mode);
@@ -134,10 +140,12 @@ static int on_set_target(void *ctx, qmp_req_t *req, const demo_joint_v1_SetTarge
     if (in->max_velocity <= 0.0f) {
         *status = QMP_UCODE_INVALID_ARGUMENT;
     } else {
+        (void)pthread_mutex_lock(&sv->mu);
         sv->target_rad = in->position_rad;
         sv->position_rad = in->position_rad; /* ideal actuator: arrives instantly */
         sv->stopped = 0;
         sv->seq++;
+        (void)pthread_mutex_unlock(&sv->mu);
         out->result = 0;
         *status = 0;
     }
@@ -148,11 +156,13 @@ static int on_set_target(void *ctx, qmp_req_t *req, const demo_joint_v1_SetTarge
 static int on_get_state(void *ctx, qmp_req_t *req, demo_joint_v1_JointState *out, int32_t *status) {
     srv_state_t *sv = (srv_state_t *)ctx;
     log_call(sv, "GetState", req);
+    (void)pthread_mutex_lock(&sv->mu);
     out->seq = sv->seq;
     out->timestamp_ns = now_ns();
     out->position_rad = sv->position_rad;
     out->velocity = 0.0f;
     fill_mode(sv, out);
+    (void)pthread_mutex_unlock(&sv->mu);
     *status = 0;
     log_reply(sv, "GetState", *status);
     return QMP_HANDLED;
@@ -163,8 +173,10 @@ static int on_get_state(void *ctx, qmp_req_t *req, demo_joint_v1_JointState *out
  * state change, not fast-path traffic. */
 static int on_stop(void *ctx, const qmp_req_info_t *info) {
     srv_state_t *sv = (srv_state_t *)ctx;
+    (void)pthread_mutex_lock(&sv->mu);
     sv->target_rad = sv->position_rad;
     sv->stopped = 1;
+    (void)pthread_mutex_unlock(&sv->mu);
     LOGF("recv Stop (one-way) client_pid=%" PRId32 " caller_prio=%" PRId32 " thread_prio=%d",
          info->pid, info->priority, thread_priority());
     return QMP_HANDLED;
@@ -246,7 +258,7 @@ typedef struct pub_ctx {
     qmp_server_t *server;
     srv_state_t *state;
     uint32_t period_ms;
-    volatile sig_atomic_t stop;
+    atomic_int stop;
 } pub_ctx_t;
 
 static void *publisher_thread(void *arg) {
@@ -257,14 +269,16 @@ static void *publisher_thread(void *arg) {
      * average rate exact; a tick of jitter on single updates remains. */
     const uint64_t period_ns = (uint64_t)pc->period_ms * 1000000ULL;
     uint64_t next = now_ns();
-    while (!pc->stop) {
+    while (!atomic_load(&pc->stop)) {
         demo_joint_v1_JointState st;
         memset(&st, 0, sizeof(st));
+        (void)pthread_mutex_lock(&pc->state->mu);
         st.seq = ++pc->state->seq;
         st.timestamp_ns = now_ns();
         st.position_rad = pc->state->position_rad;
         st.velocity = 0.0f;
         fill_mode(pc->state, &st);
+        (void)pthread_mutex_unlock(&pc->state->mu);
         int rc = demo_joint_v1_Joint_publish_StateChanged(pc->server, &st);
         if (rc == EOK) {
             rc = demo_joint_v1_Joint_publish_StateLog(pc->server, &st);
@@ -422,7 +436,9 @@ int main(int argc, char **argv) {
     sigaddset(&sc.set, SIGTERM);
     (void)pthread_sigmask(SIG_BLOCK, &sc.set, NULL);
 
-    srv_state_t state = {0.0f, 0.0f, 0, verbose, 0};
+    static srv_state_t state; /* shared with the workers and the publisher */
+    state.verbose = verbose;
+    (void)pthread_mutex_init(&state.mu, NULL);
     demo_joint_v1_Joint_ops ops;
     memset(&ops, 0, sizeof(ops));
     ops.SetTarget = on_set_target;
@@ -492,7 +508,7 @@ int main(int argc, char **argv) {
 #endif
     rc = qmp_server_run(&server); /* until a signal (or the selftest) stops it */
     if (publishing) {
-        pc.stop = 1;
+        atomic_store(&pc.stop, 1);
         (void)pthread_join(pub_thread, NULL);
     }
 #if !defined(__QNX__)

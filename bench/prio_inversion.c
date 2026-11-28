@@ -33,6 +33,7 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,7 +83,7 @@ static int self_priority(void) {
 typedef struct srv_ctx {
     qmp_server_t server;
     int prio;
-    int prio_rc;
+    atomic_int prio_rc;            /* -1 until the thread has tried to set its priority */
     volatile int handler_prio_max; /* highest priority a handler observed itself at */
     volatile int handler_prio_min;
     volatile uint64_t calls;
@@ -108,7 +109,7 @@ static int on_set_target(void *ctx, qmp_req_t *req, const demo_joint_v1_SetTarge
 
 static void *server_thread(void *arg) {
     srv_ctx_t *sc = (srv_ctx_t *)arg;
-    sc->prio_rc = set_self_priority(sc->prio);
+    atomic_store(&sc->prio_rc, set_self_priority(sc->prio));
     (void)qmp_server_run(&sc->server); /* one worker: this thread */
     return NULL;
 }
@@ -117,25 +118,25 @@ static void *server_thread(void *arg) {
 
 typedef struct hog_ctx {
     int prio;
-    int prio_rc;
+    atomic_int prio_rc; /* -1 until the thread has tried to set its priority */
     uint32_t burst_ms;
     uint32_t idle_ms;
-    volatile int stop;
-    volatile uint64_t bursts;
+    atomic_int stop;
+    atomic_uint_fast64_t bursts;
 } hog_ctx_t;
 
 static void *hog_thread(void *arg) {
     hog_ctx_t *hc = (hog_ctx_t *)arg;
-    hc->prio_rc = set_self_priority(hc->prio);
+    atomic_store(&hc->prio_rc, set_self_priority(hc->prio));
     volatile uint32_t sink = 0;
-    while (!hc->stop) {
+    while (!atomic_load(&hc->stop)) {
         uint64_t end = now_ns() + (uint64_t)hc->burst_ms * 1000000ULL;
-        while (now_ns() < end && !hc->stop) {
+        while (now_ns() < end && !atomic_load(&hc->stop)) {
             for (int i = 0; i < 1000; i++) {
                 sink += (uint32_t)i;
             }
         }
-        hc->bursts++;
+        atomic_fetch_add(&hc->bursts, 1);
         sleep_until(now_ns() + (uint64_t)hc->idle_ms * 1000000ULL);
     }
     return NULL;
@@ -248,6 +249,7 @@ int main(int argc, char **argv) {
 
     static srv_ctx_t sc;
     sc.prio = (int)prio_server;
+    atomic_init(&sc.prio_rc, -1);
     sc.handler_prio_min = 1 << 30;
     demo_joint_v1_Joint_ops ops;
     memset(&ops, 0, sizeof(ops));
@@ -294,6 +296,7 @@ int main(int argc, char **argv) {
 
     static hog_ctx_t hc;
     hc.prio = (int)prio_hog;
+    atomic_init(&hc.prio_rc, -1);
     hc.burst_ms = (uint32_t)burst_ms;
     hc.idle_ms = (uint32_t)idle_ms;
     pthread_t hog_tid;
@@ -302,10 +305,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "bench: cannot create the hog thread\n");
         return 1;
     }
+    /* Both threads report whether they got their priority before the measurement starts. */
+    while (atomic_load(&sc.prio_rc) == -1 || (hog && atomic_load(&hc.prio_rc) == -1)) {
+        sleep_until(now_ns() + 1000000ULL);
+    }
     int client_prio_rc = set_self_priority((int)prio_client);
-    if (client_prio_rc != 0 || sc.prio_rc != 0 || (hog && hc.prio_rc != 0)) {
+    int srv_prio_rc = atomic_load(&sc.prio_rc);
+    int hog_prio_rc = hog ? atomic_load(&hc.prio_rc) : 0;
+    if (client_prio_rc != 0 || srv_prio_rc != 0 || hog_prio_rc != 0) {
         fprintf(stderr, "bench: could not set a thread priority (client %d, server %d, hog %d)\n",
-                client_prio_rc, sc.prio_rc, hc.prio_rc);
+                client_prio_rc, srv_prio_rc, hog_prio_rc);
         return 1;
     }
 
@@ -343,7 +352,7 @@ int main(int argc, char **argv) {
     }
     const uint64_t elapsed_ns = now_ns() - t_start;
 
-    hc.stop = 1;
+    atomic_store(&hc.stop, 1);
     if (hog) {
         (void)pthread_join(hog_tid, NULL);
     }
@@ -372,17 +381,18 @@ int main(int argc, char **argv) {
     for (long i = 0; i < calls; i++) {
         over_1ms += lat[i] > 1000000ULL;
     }
-    printf(
-        "result: label=%s version=%s build=%s transport=%s fixed_priority=%d calls=%ld "
-        "warmup=%ld period_us=%ld hog_burst_ms=%ld hog_idle_ms=%ld prio_server=%ld "
-        "prio_hog=%ld prio_client=%ld handler_prio_min=%d handler_prio_max=%d "
-        "hog_bursts=%" PRIu64 " elapsed_ms=%" PRIu64 " min_us=" US_FMT " p50_us=" US_FMT
-        " p90_us=" US_FMT " p99_us=" US_FMT " p999_us=" US_FMT " max_us=" US_FMT " over_1ms=%ld\n",
-        label, qmp_build_version(), qmp_build_id(), tr->name, fixed_priority, calls, warmup,
-        period_us, burst_ms, idle_ms, prio_server, prio_hog, prio_client, sc.handler_prio_min,
-        sc.handler_prio_max, hc.bursts, (uint64_t)(elapsed_ns / 1000000ULL), US_ARGS(lat[0]),
-        US_ARGS(pct(lat, calls, 500)), US_ARGS(pct(lat, calls, 900)), US_ARGS(pct(lat, calls, 990)),
-        US_ARGS(pct(lat, calls, 999)), US_ARGS(lat[calls - 1]), over_1ms);
+    printf("result: label=%s version=%s build=%s transport=%s fixed_priority=%d calls=%ld "
+           "warmup=%ld period_us=%ld hog_burst_ms=%ld hog_idle_ms=%ld prio_server=%ld "
+           "prio_hog=%ld prio_client=%ld handler_prio_min=%d handler_prio_max=%d "
+           "hog_bursts=%" PRIu64 " elapsed_ms=%" PRIu64 " min_us=" US_FMT " p50_us=" US_FMT
+           " p90_us=" US_FMT " p99_us=" US_FMT " p999_us=" US_FMT " max_us=" US_FMT
+           " over_1ms=%ld\n",
+           label, qmp_build_version(), qmp_build_id(), tr->name, fixed_priority, calls, warmup,
+           period_us, burst_ms, idle_ms, prio_server, prio_hog, prio_client, sc.handler_prio_min,
+           sc.handler_prio_max, (uint64_t)atomic_load(&hc.bursts),
+           (uint64_t)(elapsed_ns / 1000000ULL), US_ARGS(lat[0]), US_ARGS(pct(lat, calls, 500)),
+           US_ARGS(pct(lat, calls, 900)), US_ARGS(pct(lat, calls, 990)),
+           US_ARGS(pct(lat, calls, 999)), US_ARGS(lat[calls - 1]), over_1ms);
     free(lat);
     return 0;
 }

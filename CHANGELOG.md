@@ -13,6 +13,22 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-28
+
+Wire version 1 · reflection version 1
+
+### Added
+- `qmp_qnx_probe` (`tools/probe/`, QNX builds only): checks the kernel facts the native
+  transport relies on directly against the QNX API, one line per `docs/VERIFY.md` entry —
+  message and IOV lengths, client credentials, cross-thread replies, registered and
+  updateable events, pulse priorities, priority behaviour with queued senders, unblock
+  requests, client and server death, `name_attach` on a caller-created channel and
+  `ClockCycles`.
+
+### Fixed
+- `-DQMP_SANITIZER=ubsan` links on QNX: the UBSan runtime is linked by name, because
+  `qcc`/`q++` do not add it.
+
 ## [0.3.3] - 2026-11-27
 
 Wire version 1 · reflection version 1

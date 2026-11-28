@@ -73,6 +73,12 @@ if(NOT QMP_SANITIZER STREQUAL "none")
   endif()
   add_compile_options(${_qmp_san_flags} -g)
   add_link_options(${_qmp_san_flags})
+  if(QMP_ON_QNX AND QMP_SANITIZER STREQUAL "ubsan")
+    # qcc/q++ do not add the UBSan runtime themselves, and SDP 8.0 ships it only as a
+    # shared library (V-QNX-022): link it by name. The target needs libubsan.so.1 on its
+    # library path (copy it from $QNX_TARGET/aarch64le/lib if the image lacks it).
+    link_libraries(ubsan)
+  endif()
 endif()
 
 if(QMP_BUILD_TESTS)
@@ -94,6 +100,9 @@ add_subdirectory(runtime)
 
 if(QMP_BUILD_TOOLS)
   add_subdirectory(tools/qmpctl)
+  if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
+    add_subdirectory(tools/probe)
+  endif()
 endif()
 
 if(QMP_BUILD_EXAMPLES)

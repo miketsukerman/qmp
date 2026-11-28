@@ -13,6 +13,21 @@ While the version is 0.y.z, a breaking change bumps the minor number.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-11-28
+
+Wire version 1 · reflection version 1
+
+### Added
+- `qmp_qnx_probe` checks eleven more `docs/VERIFY.md` entries: the messages a server sees
+  during `name_open`, truncation of an oversized message, the 64-bit rcvid in the unblock
+  pulse, a normal reply after an unblock request, `TimerTimeout` timing, `MsgPause`, and
+  anonymous, sealed, revocable shared memory handed to another process by handle.
+- `bench/run.sh` records the run conditions before and after the runs (ARM clock,
+  temperature and throttling flags from `vcgencmd`) in `conditions.txt`.
+- `scripts/target-secpol-check.sh` and `tools/probe/secpol/joint.secpol`: an opt-in check
+  that a security policy keeps an unlisted process type away from a service. It loads a
+  policy into the target's kernel and is therefore not part of the smoke run.
+
 ## [0.3.4] - 2026-11-28
 
 Wire version 1 · reflection version 1

@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Test policy for V-QNX-015: which process types may connect to the Joint service's channel.
+# Compiled by scripts/target-secpol-check.sh with `secpolcompile -m` (mutable, development).
+type joint_svc_t;
+type joint_ctrl_t;
+type joint_other_t;
+
+allow joint_ctrl_t joint_svc_t:channel connect;

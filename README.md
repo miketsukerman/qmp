@@ -119,7 +119,7 @@ client, so topics use notify-then-pull over registered events. The same core
 also runs over `transport/fake` (unit tests) and `transport/uds` (benchmarks
 only). Details and sequence diagrams: [docs/DESIGN.md](docs/DESIGN.md).
 
-## Status (0.3.4, W4)
+## Status (0.3.5, W4)
 
 | Area | State |
 |------|-------|
@@ -143,7 +143,7 @@ and patch are in [ADR-011](docs/DECISIONS.md).
 
 | Number | Now | Answers | Where |
 |--------|-----|---------|-------|
-| product version | 0.3.4 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
+| product version | 0.3.5 | which API, generator and tools do I have? | `QMP_VERSION_STRING`, `qmp_version_string()` |
 | wire version | 1 | can these two processes talk? Equal means yes | `QMP_WIRE_VERSION`, exchanged in HELLO |
 | reflection version | 1 | can this `qmpctl` read that service's description? | `qmp_reflect_version` in the reflection JSON |
 | service version | per service | is this client compatible with that interface? | `(uprotocol.service_version_*)` in the `.proto` |

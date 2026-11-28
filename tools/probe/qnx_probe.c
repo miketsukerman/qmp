@@ -31,7 +31,10 @@
 #include <unistd.h>
 
 #include <sys/dispatch.h>
+#include <fcntl.h>
 #include <sys/iomsg.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/neutrino.h>
 #include <sys/syspage.h>
 #include <sys/wait.h>
@@ -131,6 +134,15 @@ static void *iov_caller(void *arg) {
     return NULL;
 }
 
+static void *big_caller(void *arg) {
+    call_arg_t *ca = (call_arg_t *)arg;
+    static uint8_t msg[256];
+    memset(msg, 0xC3, sizeof(msg));
+    ca->result = MsgSend(ca->coid, msg, sizeof(msg), NULL, 0);
+    ca->err = ca->result == -1 ? errno : 0;
+    return NULL;
+}
+
 static void *reply_from_other_thread(void *arg) {
     rcvid_t rcvid = *(rcvid_t *)arg;
     uint8_t rep[32];
@@ -188,6 +200,30 @@ static void chk_iov_creds_crossthread(void) {
            "request received on one thread, MsgReply from another: reply errno=%ld, client got "
            "status=%ld and the payload",
            (long)(intptr_t)rret, ca.result);
+    /* V-QNX-013: a message larger than the receive buffer is cut to the buffer, and only
+     * srcmsglen tells. */
+    static uint8_t big[256];
+    static call_arg_t big_ca;
+    memset(&big_ca, 0, sizeof(big_ca));
+    big_ca.coid = coid;
+    pthread_t bt;
+    (void)pthread_create(&bt, NULL, big_caller, &big_ca);
+    memset(&info, 0, sizeof(info));
+    arm_receive_timeout(3000);
+    rcvid = MsgReceive(chid, big, 100, &info);
+    if (rcvid > 0) {
+        (void)MsgError(rcvid, EMSGSIZE);
+    }
+    (void)pthread_join(bt, NULL);
+    report(
+        "V-QNX-013",
+        VERDICT(rcvid > 0 && info.msglen == 100 && info.srcmsglen == 256 && big_ca.err == EMSGSIZE),
+        "256-byte message into a 100-byte receive buffer: msglen=%ld, srcmsglen=%ld; the "
+        "client sees the server's MsgError as errno=%d (%s)",
+        (long)info.msglen, (long)info.srcmsglen, big_ca.err, strerror(big_ca.err));
+    report("V-QNX-033", VERDICT(sizeof(rcvid_t) == 8 && sizeof(((struct _pulse *)0)->value) == 8),
+           "sizeof(rcvid_t)=%zu, pulse value=%zu bytes; this rcvid=0x%llx", sizeof(rcvid_t),
+           sizeof(((struct _pulse *)0)->value), (unsigned long long)rcvid);
     (void)ConnectDetach(coid);
     (void)ChannelDestroy(chid);
 }
@@ -417,9 +453,11 @@ static void *timeout_caller(void *arg) {
     call_arg_t *ca = (call_arg_t *)arg;
     uint64_t ns = 200000000ULL;
     uint8_t msg[8] = {0};
+    uint64_t t0 = now_ns();
     (void)TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY, NULL, &ns, NULL);
-    ca->result = MsgSend(ca->coid, msg, sizeof(msg), NULL, 0);
+    ca->result = MsgSend(ca->coid, msg, sizeof(msg), ca->rep_b, sizeof(ca->rep_b));
     ca->err = ca->result == -1 ? errno : 0;
+    ca->delay_ms = (unsigned)((now_ns() - t0) / 1000000ULL); /* reused as "elapsed" */
     return NULL;
 }
 
@@ -443,6 +481,7 @@ static void chk_unblock(void) {
     int during = MsgInfo(rcvid, &mi) == 0 ? (mi.flags & _NTO_MI_UNBLOCK_REQ) != 0 : -1;
     (void)MsgError(rcvid, ETIMEDOUT);
     (void)pthread_join(tid, NULL);
+    unsigned first_elapsed = ca.delay_ms;
     int after_rc = MsgInfo(rcvid, &mi);
     int after_errno = after_rc == -1 ? errno : 0;
     int ok = prc == 0 && before == 0 && during == 1 && after_rc == -1 &&
@@ -453,6 +492,51 @@ static void chk_unblock(void) {
            "errno=%d; client errno=%d",
            (int)p.code, (rcvid_t)p.value.sival_long == rcvid, before, during, after_rc, after_errno,
            ca.err);
+    report("V-QNX-031",
+           VERDICT(prc == 0 && (rcvid_t)p.value.sival_long == rcvid &&
+                   (rcvid_t)(intptr_t)p.value.sival_ptr == rcvid),
+           "the unblock pulse carries the whole 64-bit rcvid in sival_long and sival_ptr "
+           "(rcvid=0x%llx, sival_int alone=0x%x)",
+           (unsigned long long)rcvid, (unsigned)p.value.sival_int);
+
+    /* V-QNX-006 (a) and (d), V-QNX-035: the client stays blocked past its 200 ms budget
+     * until the server answers, and a normal reply then still reaches it. */
+    memset(&ca, 0, sizeof(ca));
+    ca.coid = coid;
+    (void)pthread_create(&tid, NULL, timeout_caller, &ca);
+    arm_receive_timeout(3000);
+    rcvid = MsgReceive(chid, buf, sizeof(buf), NULL);
+    arm_receive_timeout(3000);
+    prc = MsgReceivePulse(chid, &p, sizeof(p), NULL);
+    uint64_t pulse_at = now_ns();
+    msleep(300); /* hold the request: the client must still be blocked */
+    uint8_t rep8[8] = {9, 9, 9, 9, 9, 9, 9, 9};
+    long rrc = MsgReply(rcvid, 5, rep8, sizeof(rep8));
+    (void)pthread_join(tid, NULL);
+    (void)pulse_at;
+    report(
+        "V-QNX-006",
+        VERDICT(prc == 0 && rrc == 0 && ca.result == 5 && ca.rep_b[0] == 9 && ca.delay_ms >= 480),
+        "200 ms client timeout, server replies normally 300 ms after the unblock pulse: the "
+        "client stayed blocked for %u ms and got status=%ld with the payload (errno=%d)",
+        ca.delay_ms, ca.result, ca.err);
+    report("V-QNX-035", VERDICT(first_elapsed >= 195 && first_elapsed <= 260),
+           "TimerTimeout(SEND|REPLY) of 200 ms on a REPLY-blocked call: the server was asked "
+           "to unblock and the call returned ETIMEDOUT after %u ms",
+           first_elapsed);
+
+    /* V-QNX-034: MsgPause is gone in 8.0. */
+    memset(&ca, 0, sizeof(ca));
+    ca.coid = coid;
+    (void)pthread_create(&tid, NULL, big_caller, &ca);
+    arm_receive_timeout(3000);
+    rcvid = MsgReceive(chid, buf, sizeof(buf), NULL);
+    int pause_rc = MsgPause(rcvid, 0);
+    int pause_errno = pause_rc == -1 ? errno : 0;
+    (void)MsgReply(rcvid, 0, NULL, 0);
+    (void)pthread_join(tid, NULL);
+    report("V-QNX-034", VERDICT(pause_rc == -1 && pause_errno == ENOSYS),
+           "MsgPause(rcvid, 0) -> %d errno=%d (%s)", pause_rc, pause_errno, strerror(pause_errno));
     (void)ConnectDetach(coid);
     (void)ChannelDestroy(chid);
 }
@@ -474,15 +558,42 @@ static void chk_name_attach(void) {
     }
     pthread_t opener;
     (void)pthread_create(&opener, NULL, name_opener, (void *)(uintptr_t)name);
+    /* Serve the channel the way the transport does while name_open runs: EOK for
+     * _IO_CONNECT, ENOSYS for any other resource-manager message; log every type seen. */
     uint8_t cbuf[256];
-    arm_receive_timeout(3000);
-    rcvid_t crcvid = MsgReceive(chid, cbuf, sizeof(cbuf), NULL);
-    if (crcvid > 0) {
-        (void)MsgReply(crcvid, EOK, NULL, 0); /* name_open's _IO_CONNECT */
+    char seen[96] = "";
+    int connects = 0;
+    int others = 0;
+    for (;;) {
+        memset(cbuf, 0, sizeof(cbuf));
+        arm_receive_timeout(500);
+        rcvid_t r = MsgReceive(chid, cbuf, sizeof(cbuf), NULL);
+        if (r <= 0) {
+            break;
+        }
+        uint16_t type = 0;
+        memcpy(&type, cbuf, sizeof(type));
+        size_t used = strlen(seen);
+        (void)snprintf(seen + used, sizeof(seen) - used, "%s0x%X", used != 0 ? "," : "",
+                       (unsigned)type);
+        if (type == _IO_CONNECT) {
+            connects++;
+            (void)MsgReply(r, EOK, NULL, 0);
+        } else {
+            others++;
+            (void)MsgError(r, ENOSYS);
+        }
     }
     void *oret = NULL;
     (void)pthread_join(opener, &oret);
     int coid = (int)(intptr_t)oret;
+    report("V-QNX-003", VERDICT(connects == 0 && others == 1 && coid != -1),
+           "message types the server receives while a client runs name_open: %s (_IO_DEVCTL = "
+           "0x%X; no _IO_CONNECT = 0x%X arrives). It was answered with MsgError(ENOSYS) and "
+           "name_open still returns %d",
+           seen, (unsigned)_IO_DEVCTL, (unsigned)_IO_CONNECT, coid);
+    report("V-QNX-002", VERDICT(coid != -1),
+           "name_attach and name_open accept the hierarchical name \"%s\"", name);
     report("V-QNX-039", VERDICT(att->chid == chid && coid != -1),
            "name_attach(dispatch_create_channel(chid)) keeps our channel: attach->chid=%d, "
            "ours=%d, name_open -> %d",
@@ -490,6 +601,24 @@ static void chk_name_attach(void) {
     if (coid != -1) {
         (void)name_close(coid);
     }
+    /* name_close: a disconnect pulse (our channel has _NTO_CHF_DISCONNECT), no message. */
+    int close_msgs = 0;
+    int close_disconnects = 0;
+    for (;;) {
+        arm_receive_timeout(300);
+        rcvid_t r = MsgReceive(chid, cbuf, sizeof(cbuf), NULL);
+        if (r == -1) {
+            break;
+        }
+        if (r == 0) {
+            close_disconnects += ((struct _pulse *)(void *)cbuf)->code == _PULSE_CODE_DISCONNECT;
+        } else {
+            close_msgs++;
+            (void)MsgError(r, ENOSYS);
+        }
+    }
+    report("V-QNX-003", "INFO", "name_close: %d message(s), %d _PULSE_CODE_DISCONNECT", close_msgs,
+           close_disconnects);
     int drc = name_detach(att, 0);
     int destroy_rc = ChannelDestroy(chid);
     int destroy_errno = destroy_rc == -1 ? errno : 0;
@@ -502,6 +631,13 @@ static void chk_name_attach(void) {
 }
 
 /* ---- child-process scenarios: V-QNX-004 / V-QNX-024 / V-QNX-005 ------------------------ */
+
+struct shm_child_report {
+    int map_errno;
+    int second_errno;
+    uint8_t first_byte;
+    uint8_t _pad[7];
+};
 
 static pid_t spawn_child(const char *mode, int chid) {
     char pidbuf[24];
@@ -527,6 +663,26 @@ static int child_main(const char *mode, pid_t ppid, int pchid) {
         uint8_t msg[8] = {1};
         (void)MsgSend(c1, msg, sizeof(msg), NULL, 0); /* the parent never replies in time */
         return 0;
+    }
+    if (strcmp(mode, "shm") == 0) {
+        int c = ConnectAttach(0, ppid, pchid, _NTO_SIDE_CHANNEL, 0);
+        shm_handle_t handle = 0;
+        uint8_t hello = 0;
+        if (c == -1 || MsgSend(c, &hello, sizeof(hello), &handle, sizeof(handle)) == -1) {
+            return 3;
+        }
+        struct shm_child_report rep;
+        memset(&rep, 0, sizeof(rep));
+        volatile uint8_t *m = mmap_handle(NULL, 4096, PROT_READ, MAP_SHARED, handle, 0);
+        rep.map_errno = m == MAP_FAILED ? errno : 0;
+        rep.first_byte = m != MAP_FAILED ? m[0] : 0;
+        void *again = mmap_handle(NULL, 4096, PROT_READ, MAP_SHARED, handle, 0);
+        rep.second_errno = again == MAP_FAILED ? errno : 0;
+        /* The parent revokes the mapping before it answers this message. */
+        if (MsgSend(c, &rep, sizeof(rep), NULL, 0) == -1 || m == MAP_FAILED) {
+            return 3;
+        }
+        return m[0] == 0x5C ? 0 : 4; /* expected to fault instead of getting here */
     }
     if (strcmp(mode, "serve") == 0) {
         int chid = ChannelCreate(0);
@@ -641,6 +797,62 @@ static void chk_server_death(void) {
     (void)ChannelDestroy(chid);
 }
 
+/* ---- V-QNX-017: anonymous, sealed, revocable shared memory handed over by handle -------- */
+
+static void chk_shm(void) {
+    int fd = shm_open(SHM_ANON, O_RDWR | O_CREAT, 0600);
+    int ctl = fd != -1 ? shm_ctl(fd, SHMCTL_ANON | SHMCTL_SEAL | SHMCTL_REVOCABLE, 0, 4096) : -1;
+    uint8_t *mine =
+        ctl != -1 ? mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (mine == MAP_FAILED) {
+        report("V-QNX-017", "FAIL", "shm_open(SHM_ANON)=%d shm_ctl=%d mmap failed errno=%d", fd,
+               ctl, errno);
+        return;
+    }
+    memset(mine, 0x5C, 4096);
+    int chid = ChannelCreate(0);
+    pid_t child = spawn_child("shm", chid);
+    uint8_t buf[64];
+    arm_receive_timeout(5000);
+    rcvid_t rcvid = child != -1 ? MsgReceive(chid, buf, sizeof(buf), NULL) : -1;
+    if (rcvid <= 0) {
+        report("V-QNX-017", "FAIL", "no message from the helper errno=%d", errno);
+        return;
+    }
+    shm_handle_t handle = 0;
+    int hrc = shm_create_handle(fd, child, O_RDONLY, &handle, SHM_CREATE_HANDLE_OPT_NOFD);
+    int herrno = hrc == -1 ? errno : 0;
+    (void)MsgReply(rcvid, 0, &handle, sizeof(handle));
+    struct shm_child_report rep;
+    memset(&rep, 0xFF, sizeof(rep));
+    arm_receive_timeout(5000);
+    rcvid = MsgReceive(chid, &rep, sizeof(rep), NULL);
+    int revoke_rc = shm_revoke(fd, child);
+    int revoke_errno = revoke_rc == -1 ? errno : 0;
+    if (rcvid > 0) {
+        (void)MsgReply(rcvid, 0, NULL, 0);
+    }
+    int status = 0;
+    (void)waitpid(child, &status, 0);
+    struct rlimit rl;
+    memset(&rl, 0, sizeof(rl));
+    int rlrc = getrlimit(RLIMIT_SHM_HANDLES_NP, &rl);
+    int ok = hrc == 0 && rep.map_errno == 0 && rep.first_byte == 0x5C && rep.second_errno != 0 &&
+             revoke_rc == 0 && WIFSIGNALED(status);
+    report("V-QNX-017", VERDICT(ok),
+           "SHM_ANON object with SHMCTL_ANON|SEAL|REVOCABLE; shm_create_handle(NOFD) -> %d "
+           "errno=%d; the other process maps it with mmap_handle (errno=%d) and reads 0x%02X; "
+           "a second mmap_handle of the same handle fails with errno=%d; shm_revoke -> %d "
+           "errno=%d, after which its next read ends it with signal %d",
+           hrc, herrno, rep.map_errno, rep.first_byte, rep.second_errno, revoke_rc, revoke_errno,
+           WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    report("V-QNX-017", "INFO", "RLIMIT_SHM_HANDLES_NP: getrlimit -> %d, soft=%lld hard=%lld", rlrc,
+           (long long)rl.rlim_cur, (long long)rl.rlim_max);
+    (void)munmap(mine, 4096);
+    (void)close(fd);
+    (void)ChannelDestroy(chid);
+}
+
 int main(int argc, char **argv) {
     g_self = argv[0];
     if (argc == 5 && strcmp(argv[1], "child") == 0) {
@@ -655,6 +867,7 @@ int main(int argc, char **argv) {
     /* The child scenarios spawn processes: run them before any other thread exists. */
     chk_client_death();
     chk_server_death();
+    chk_shm();
     chk_iov_creds_crossthread();
     chk_events();
     chk_highest_pending();

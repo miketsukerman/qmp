@@ -22,7 +22,8 @@
 #   QMP_BENCH_CPU   optional  CPU all threads are pinned to (default: 3)
 #   QMP_BENCH_OUT   optional  local results directory (default: bench/results/<build id>)
 #
-# Output: one "result:" line per run on stdout; summary.txt and the raw per-call latencies
+# Output: one "result:" line per run on stdout, with a "conditions:" line (ARM clock,
+# temperature, throttling flags) before and after; summary.txt, conditions.txt and the raw per-call latencies
 # (<label>.ns, nanoseconds, one per line) in the results directory. bench/plot.py turns
 # that directory into a table and a chart. bench/results/ is not tracked by git.
 
@@ -86,6 +87,17 @@ run() {
 retries=0
 
 echo "target: $(t 'uname -srm')  cpu=$CPU"
+
+# Run conditions (V-QNX-028). The Raspberry Pi firmware tool reports the ARM clock, the SoC
+# temperature and the throttling flags: bit 0 = under-voltage now, bit 1 = frequency capped,
+# bit 2 = throttled, bit 3 = soft temperature limit, bits 16-19 = the same since boot. On
+# the QNX quick-start image the clock is fixed (no frequency scaling), so a run is valid
+# when the clock is unchanged and throttled stays 0x0 from start to end.
+conditions() { # $1 = "before" | "after"
+    _c=$(t 'command -v vcgencmd >/dev/null 2>&1 && { vcgencmd measure_clock arm; vcgencmd measure_temp; vcgencmd get_throttled; } 2>/dev/null | tr "\n" " "' || true)
+    echo "conditions: when=$1 ${_c:-vcgencmd=unavailable}"
+}
+conditions before | tee "$tmp/conditions.txt"
 run qnx-quiet       --transport qnx --hog-burst-ms 0 "$@"
 run qnx-fixed-quiet --transport qnx --fixed-priority --hog-burst-ms 0 "$@"
 run uds-quiet       --transport uds --hog-burst-ms 0 "$@"
@@ -93,10 +105,13 @@ run qnx-hog         --transport qnx "$@"
 run qnx-fixed-hog   --transport qnx --fixed-priority "$@"
 run uds-hog         --transport uds "$@"
 
+conditions after | tee -a "$tmp/conditions.txt"
+
 build=$(sed -n 's/.* build=\([^ ]*\) .*/\1/p' "$tmp/qnx-quiet.out" | head -n 1)
 out="${QMP_BENCH_OUT:-bench/results/${build:-unknown}}"
 mkdir -p "$out"
 cat "$tmp"/*.out > "$out/summary.txt"
+cp "$tmp/conditions.txt" "$out/"
 cp "$tmp"/*.ns "$out/" 2>/dev/null || true
 echo "results: $out"
 [ "$retries" -eq 0 ] || echo "note: $retries run(s) had to be repeated after the target stopped answering" >&2
